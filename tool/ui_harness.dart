@@ -45,6 +45,12 @@ Future<void> main() async {
   stdout.writeln('DATA_DIR=${dataDir.path}');
   await stdout.flush();
 
+  // 票据是一次性的：周期性发新票，方便多次浏览器接入（测试便利）。
+  Timer.periodic(const Duration(seconds: 30), (_) {
+    stdout.writeln('NEW_TICKET=${app.console.launchUri()}');
+    stdout.flush();
+  });
+
   // 挂住进程，等 SIGINT/kill。
   await Completer<void>().future;
 }

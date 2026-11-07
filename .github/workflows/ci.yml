@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - name: Install dependencies
+        run: dart pub get
+      - name: Embed UI assets
+        run: dart run tool/embed_assets.dart
+      - name: Analyze
+        run: dart analyze
+      - name: Test
+        run: dart test
+      - name: E2E smoke
+        run: dart run tool/e2e_smoke.dart
