@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eatgemini 监控</title>
+<link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+<!-- 图标 sprite：24 网格 / stroke 1.75 / round cap·join / currentColor。
+     设计来源：产品设计-UI视觉与交互规范 §04（构建期内嵌，无外链）。
+     sprite 内容由 app.js 注入（内联 SVG 在 HTML 中无需命名空间声明）。 -->
+<svg class="sprite" aria-hidden="true" id="sprite-box"></svg>
+
+<div id="app" class="shell">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo"><svg class="ic"><use href="#i-gem"/></svg></span>
+      <span class="brand-name">eatgemini</span>
+      <span class="ver" id="app-ver"></span>
+    </div>
+    <div class="tsep"></div>
+    <div class="state-chip">
+      <span class="dot" id="state-dot"></span>
+      <span id="state-text">正在连接…</span>
+    </div>
+    <div class="gw-pill">
+      <span class="gw-label">网关</span>
+      <code id="gw-url">—</code>
+      <button class="iconbtn" id="copy-gw" type="button" title="复制网关地址">
+        <svg class="ic ic-13"><use href="#i-copy"/></svg>
+      </button>
+    </div>
+    <div class="reset-chip">
+      <svg class="ic ic-dim"><use href="#i-clock"/></svg>
+      <span class="gw-label">额度重置</span>
+      <b id="reset-in">—</b>
+    </div>
+    <button class="iconbtn" id="theme-toggle" type="button" title="切换深浅主题">
+      <svg class="ic"><use href="#i-moon"/></svg>
+    </button>
+  </header>
+  <div id="banner" class="banner hidden"></div>
+  <div class="body">
+    <nav id="nav" class="side">
+      <button class="nav-item active" data-tab="overview" type="button">
+        <svg class="ic"><use href="#i-pulse"/></svg><span>概览</span>
+      </button>
+      <button class="nav-item" data-tab="models" type="button">
+        <svg class="ic"><use href="#i-quota"/></svg><span>模型与额度</span>
+      </button>
+      <button class="nav-item" data-tab="requests" type="button">
+        <svg class="ic"><use href="#i-list"/></svg><span>请求记录</span>
+      </button>
+      <button class="nav-item" data-tab="connect" type="button">
+        <svg class="ic"><use href="#i-plug"/></svg><span>接入</span>
+      </button>
+      <button class="nav-item" data-tab="secrets" type="button">
+        <svg class="ic"><use href="#i-key"/></svg><span>密钥</span>
+      </button>
+      <button class="nav-item" data-tab="settings" type="button">
+        <svg class="ic"><use href="#i-sliders"/></svg><span>设置</span>
+      </button>
+      <button class="nav-item" data-tab="diag" type="button">
+        <svg class="ic"><use href="#i-diag"/></svg><span>诊断</span>
+      </button>
+      <div class="spacer"></div>
+      <button class="nav-item exit" id="exit" type="button">
+        <svg class="ic"><use href="#i-x"/></svg><span>退出 eatgemini</span>
+      </button>
+      <div class="side-foot">Gemini 额度路由网关<br>数据仅保存在本机</div>
+    </nav>
+    <main id="main" class="main"></main>
+  </div>
+</div>
+<div id="overlay"></div>
+<div id="toasts"></div>
+<script type="module" src="/ui/app.js"></script>
+</body>
+</html>
