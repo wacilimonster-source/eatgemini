@@ -29,6 +29,9 @@ enum FailureKind {
 
 extension FailureKindX on FailureKind {
   /// 是否值得换下一个候选模型。
+  ///
+  /// blocked（内容过滤拦截）也换模型：拦截判定对边界内容有随机性，
+  /// 且不同模型的安全阈值不同；每次尝试仍由上游自己的过滤器裁决。
   bool get tryNextModel => switch (this) {
         FailureKind.rpmLimited ||
         FailureKind.tpmLimited ||
@@ -39,7 +42,8 @@ extension FailureKindX on FailureKind {
         FailureKind.modelUnavailable ||
         FailureKind.modelAccessDenied ||
         FailureKind.repairableParam ||
-        FailureKind.upstreamProtocolError =>
+        FailureKind.upstreamProtocolError ||
+        FailureKind.blocked =>
           true,
         _ => false,
       };

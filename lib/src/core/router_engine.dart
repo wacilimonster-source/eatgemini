@@ -280,12 +280,17 @@ class RouterEngine {
       }
       final now = clock();
       if (attempts >= policy.maxUpstreamRequests) break;
-      if (distinctModels >= policy.maxDistinctModels) break;
 
       _Candidate? chosen;
       while (cursor < queue.length) {
         final candidate = queue[cursor];
         if (candidate.exhausted) {
+          cursor++;
+          continue;
+        }
+        // 去重上限只挡"没试过的新模型"，不挡重试——否则预算内的
+        // 再轮一圈（blocked 重试）会被上限提前终止。
+        if (!candidate.seen && distinctModels >= policy.maxDistinctModels) {
           cursor++;
           continue;
         }
@@ -319,6 +324,24 @@ class RouterEngine {
           }
           cursor = 0;
           continue;
+        }
+        // 全部候选都因内容过滤被耗尽：只要全局预算还没用完，就从头
+        // 再轮一遍——拦截判定有随机性，第二圈可能通过。每轮都会消耗
+        // attempts，循环由 maxUpstreamRequests 与路由截止兜底。
+        if (queue.any((c) => c.blockedExhausted)) {
+          var resetAny = false;
+          for (final c in queue) {
+            if (c.blockedExhausted && c.skip == null) {
+              c.exhausted = false;
+              c.blockedExhausted = false;
+              c.blockedRetries = 0;
+              resetAny = true;
+            }
+          }
+          if (resetAny) {
+            cursor = 0;
+            continue;
+          }
         }
         break;
       }
@@ -444,9 +467,22 @@ class RouterEngine {
           if (kind.scopeWide) {
             return _failureToResult(trace, outcome.failure);
           }
-          if (kind == FailureKind.blocked ||
-              kind == FailureKind.invalidRequest) {
+          if (kind == FailureKind.invalidRequest) {
             return _failureToResult(trace, outcome.failure);
+          }
+          if (kind == FailureKind.blocked) {
+            // 内容过滤拦截不是终局：先在同一模型上重试（判定有随机性），
+            // 重试额度用尽后换下一个候选模型；全部候选耗尽且预算未用完时，
+            // 由下方的第二轮循环从头再轮。每次尝试仍由上游过滤器裁决。
+            if (chosen.blockedRetries < policy.maxBlockedRetriesPerModel) {
+              chosen.blockedRetries++;
+              trace.transforms.add('retry:blocked');
+              continue; // 同一模型再试一次
+            }
+            chosen.exhausted = true;
+            chosen.blockedExhausted = true;
+            cursor++;
+            continue; // 换下一个候选模型
           }
           if (kind == FailureKind.repairableParam &&
               repairs < policy.maxParamRepairsPerRequest &&
@@ -1481,6 +1517,12 @@ class _Candidate {
   final String modelId;
   final ModelSpec spec;
   final Set<String> repairs = {};
+
+  /// 内容过滤（blocked）后同模型已重试的次数。
+  int blockedRetries = 0;
+
+  /// 因 blocked 重试额度用尽而被耗尽：全局预算未用完时可重置再轮。
+  bool blockedExhausted = false;
   bool seen = false;
   bool exhausted = false;
   SkipInfo? skip;

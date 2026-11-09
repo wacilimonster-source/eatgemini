@@ -199,6 +199,30 @@ Future<void> writeStream(
   await req.response.close();
 }
 
+/// 写一个首帧即 content_filter 的流式响应（HTTP 200 但内容被过滤拦截）。
+///
+/// 网关会取消连接：客户端断开后服务端写入可能失败，吞掉即可。
+Future<void> writeBlockedFirstFrame(HttpRequest req) async {
+  try {
+    req.response.statusCode = 200;
+    req.response.headers.set('content-type', 'text/event-stream; charset=utf-8');
+    req.response.write('data: ${jsonEncode({
+          'id': 'chatcmpl_test',
+          'object': 'chat.completion.chunk',
+          'model': 'gemini-3.8-flash',
+          'choices': [
+            {
+              'index': 0,
+              'delta': const <String, Object?>{},
+              'finish_reason': 'content_filter: PROHIBITED_CONTENT',
+            }
+          ],
+        })}\n\n');
+    req.response.write('data: [DONE]\n\n');
+    await req.response.close();
+  } catch (_) {}
+}
+
 /// 写一个错误响应。
 Future<void> writeError(
   HttpRequest req,

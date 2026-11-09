@@ -182,18 +182,115 @@ void main() {
       };
       final result = await engine.route(input('router:chat'));
       if (partial) {
+        // 提交后（已有正文流出）不再换模型：以 SSE error 收尾。
         final text = await (result as RouteStreamResult).body.transform(utf8.decoder).join();
         expect(text, contains('半截'));
         expect(text, contains('blocked_by_upstream'));
         expect(text, isNot(contains('incomplete_stream')));
+        expect(fake.requests, hasLength(1));
       } else {
+        // 首帧即拦截：按预算重试/换模型，全部拦截后返回 400。
         expect((result as RouteErrorResult).code, 'blocked_by_upstream');
+        expect(result.status, 400);
+        expect(fake.requests, hasLength(8));
+        expect(result.trace.upstreamAttempts, 8);
       }
-      expect(fake.requests, hasLength(1));
       expect(result.trace.finishReason, 'content_filter: PROHIBITED_CONTENT');
       expect(result.trace.upstreamEnd, 'content_filter');
     });
   }
+
+  test('内容过滤：同模型重试额度用尽后换下一个模型', () async {
+    // 3.8-flash 连续 3 次（1 次 + 2 次重试）首帧即拦截，第 4 次尝试换到
+    // 3.6-flash 并成功。
+    for (var i = 0; i < 3; i++) {
+      fake.script.add(FakeResponse((req) => writeBlockedFirstFrame(req)));
+    }
+    final result = await engine.route(input('router:chat'));
+    expect(result, isA<RouteStreamResult>());
+    final stream = result as RouteStreamResult;
+    final text = await stream.body.transform(utf8.decoder).join();
+    expect(text, contains('你好'));
+    expect(stream.trace.upstreamAttempts, 4);
+    expect(stream.trace.servedModel, 'gemini-3.6-flash');
+    expect(stream.trace.fellBack, isTrue);
+    expect(stream.trace.transforms.where((t) => t == 'retry:blocked'),
+        hasLength(2));
+    expect(fake.requests.map((r) => r['model']).toList(), [
+      'gemini-3.8-flash',
+      'gemini-3.8-flash',
+      'gemini-3.8-flash',
+      'gemini-3.6-flash',
+    ]);
+  });
+
+  test('内容过滤：预算内再轮一圈后成功', () async {
+    // 不做同模型重试（maxBlockedRetriesPerModel=0）：第一圈 6 个模型全部
+    // 拦截（6 次尝试 < 8），第二圈回到首个模型并放行。
+    final cfg = config.toJson();
+    ((cfg['policy'] as Map))['maxBlockedRetriesPerModel'] = 0;
+    config = decodeConfig(cfg);
+    for (var i = 0; i < 6; i++) {
+      fake.script.add(FakeResponse((req) => writeBlockedFirstFrame(req)));
+    }
+    final result = await engine.route(input('router:chat'));
+    expect(result, isA<RouteStreamResult>());
+    final stream = result as RouteStreamResult;
+    await stream.body.transform(utf8.decoder).join();
+    expect(stream.trace.upstreamAttempts, 7);
+    expect(stream.trace.servedModel, 'gemini-3.8-flash');
+    expect(fake.requests.map((r) => r['model']).toList(), [
+      'gemini-3.8-flash',
+      'gemini-3.6-flash',
+      'gemini-3-flash-preview',
+      'gemini-3.5-flash-lite',
+      'gemini-3.1-flash-lite',
+      'gemini-2.5-flash-lite',
+      'gemini-3.8-flash',
+    ]);
+  });
+
+  test('内容过滤：全部预算耗尽后仍返回 400 blocked_by_upstream', () async {
+    final cfg = config.toJson();
+    ((cfg['policy'] as Map))['maxBlockedRetriesPerModel'] = 0;
+    config = decodeConfig(cfg);
+    fake.chatHandler = (req, body) => writeBlockedFirstFrame(req);
+
+    final result = await engine.route(input('router:chat'));
+    expect(result, isA<RouteErrorResult>());
+    final err = result as RouteErrorResult;
+    expect(err.status, 400);
+    expect(err.code, 'blocked_by_upstream');
+    expect(result.trace.upstreamAttempts, 8);
+    expect(result.trace.servedModel, isNull);
+  });
+
+  test('非流式：content_filter 结束原因同样重试换模型', () async {
+    final cfg = config.toJson();
+    ((cfg['policy'] as Map))['maxBlockedRetriesPerModel'] = 0;
+    config = decodeConfig(cfg);
+    fake.script.add(FakeResponse((req) async {
+      req.response.statusCode = 200;
+      req.response.headers.contentType = ContentType.json;
+      req.response.write(jsonEncode({
+        'id': 'x',
+        'model': 'gemini-3.8-flash',
+        'choices': [
+          {
+            'index': 0,
+            'message': {'role': 'assistant', 'content': ''},
+            'finish_reason': 'content_filter',
+          }
+        ],
+      }));
+      await req.response.close();
+    }));
+    final result = await engine.route(input('router:chat', stream: false));
+    expect(result, isA<RouteJsonResult>());
+    expect(fake.requests.map((r) => r['model']).toList(),
+        ['gemini-3.8-flash', 'gemini-3.6-flash']);
+    expect((result as RouteJsonResult).trace.servedModel, 'gemini-3.6-flash');
+  });
 
   test('提交后断流：发 SSE error，不伪造完成', () async {
     fake.chatHandler = (req, body) async {

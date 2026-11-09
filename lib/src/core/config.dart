@@ -208,6 +208,7 @@ class PolicyConfig {
     this.maxUpstreamRequests = 8,
     this.maxTransientRetriesPerRequest = 1,
     this.maxParamRepairsPerRequest = 1,
+    this.maxBlockedRetriesPerModel = 2,
     this.routingDeadlineMs = 60000,
     this.requestDeadlineMs = 0,
     this.maxInFlight = 4,
@@ -226,6 +227,10 @@ class PolicyConfig {
   final int maxUpstreamRequests;
   final int maxTransientRetriesPerRequest;
   final int maxParamRepairsPerRequest;
+
+  /// 内容过滤（blocked）后同一模型的重试次数；0 表示不重试、直接换模型。
+  /// 换模型与总轮次不受此项限制，由 maxUpstreamRequests/routingDeadline 兜底。
+  final int maxBlockedRetriesPerModel;
   final int routingDeadlineMs;
 
   /// 0 表示不限制总生成时长；首事件和流空闲超时仍独立生效。
@@ -248,6 +253,7 @@ class PolicyConfig {
         'maxUpstreamRequests': maxUpstreamRequests,
         'maxTransientRetriesPerRequest': maxTransientRetriesPerRequest,
         'maxParamRepairsPerRequest': maxParamRepairsPerRequest,
+        'maxBlockedRetriesPerModel': maxBlockedRetriesPerModel,
         'routingDeadlineMs': routingDeadlineMs,
         'requestDeadlineMs': requestDeadlineMs,
         'maxInFlight': maxInFlight,
@@ -1008,6 +1014,7 @@ PolicyConfig _policy(Object? raw, List<String> errors) {
     maxUpstreamRequests: read('maxUpstreamRequests', 8),
     maxTransientRetriesPerRequest: read('maxTransientRetriesPerRequest', 1),
     maxParamRepairsPerRequest: read('maxParamRepairsPerRequest', 1),
+    maxBlockedRetriesPerModel: read('maxBlockedRetriesPerModel', 2),
     routingDeadlineMs: read('routingDeadlineMs', 60000),
     requestDeadlineMs: read('requestDeadlineMs', 0),
     maxInFlight: read('maxInFlight', 4),
@@ -1031,6 +1038,7 @@ PolicyConfig _policy(Object? raw, List<String> errors) {
     ('maxRequestBytes', p.maxRequestBytes),
     ('maxBufferedResponseBytes', p.maxBufferedResponseBytes),
     ('requestDeadlineMs', p.requestDeadlineMs),
+    ('maxBlockedRetriesPerModel', p.maxBlockedRetriesPerModel),
   ]) {
     if (pair.$2 < 0) errors.add('policy.${pair.$1} 不能为负数（0 为不限）');
   }
