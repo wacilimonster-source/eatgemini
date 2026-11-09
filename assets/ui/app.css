@@ -335,10 +335,12 @@ select.eg-sel {
 }
 .switch { position: relative; width: 36px; height: 21px; flex: none; cursor: pointer; display: inline-block; }
 .switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
-.switch .tr { position: absolute; inset: 0; border-radius: 99px; background: var(--line-2); transition: background var(--t-med) var(--ease); }
+/* 轨道与圆钮晚于 input 渲染、盖在其上：必须禁掉命中，否则点击落在装饰层
+   上，透明 checkbox 永远收不到点击（开关"无反应"） */
+.switch .tr { position: absolute; inset: 0; border-radius: 99px; background: var(--line-2); transition: background var(--t-med) var(--ease); pointer-events: none; }
 .switch .kn {
   position: absolute; top: 2.5px; left: 2.5px; width: 16px; height: 16px; border-radius: 50%;
-  background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35); transition: transform var(--t-med) var(--ease);
+  background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35); transition: transform var(--t-med) var(--ease); pointer-events: none;
 }
 .switch input:checked ~ .tr { background: var(--accent); }
 .switch input:checked ~ .kn { transform: translateX(15px); }

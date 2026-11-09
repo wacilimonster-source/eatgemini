@@ -916,7 +916,7 @@ function modelRow(m) {
       h('div', { class: 'cell-main mono', text: m.id }),
       m.notes && !exp ? h('div', { class: 'cell-sub', text: m.notes }) : null),
     h('td', {},
-      h('span', { class: 'switch' },
+      h('span', { class: 'switch', onclick: (e) => e.stopPropagation() }, // 切换开关不触发行展开
         h('input', {
           type: 'checkbox', checked: m.enabled,
           onchange: async (e) => {
@@ -925,7 +925,7 @@ function modelRow(m) {
               await api(`/api/models/${encodeURIComponent(m.id)}/enabled`, { method: 'POST', body: { enabled: !m.enabled } });
               toast('已保存');
               S.models = await api('/api/models');
-              await refreshSnapshot();
+              render();
             } catch (err) { toast(err.message, 'err'); }
           },
         }),
