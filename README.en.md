@@ -64,7 +64,7 @@ pockettavern ─┘        │  quota engine    2. gemini-2.5-flash-lite   ← t
 
 ## Quick start
 
-1. **Download** [`eatgemini-v0.2.0.exe`](https://github.com/wacilimonster-source/eatgemini/releases/latest) and double-click it.
+1. **Download** [`eatgemini-v0.2.3.exe`](https://github.com/wacilimonster-source/eatgemini/releases/latest) and double-click it.
 2. **Paste your Google AI Studio key** in the guided 3-step setup (validated first, encrypted locally with DPAPI).
 3. **Point your client** at the gateway — the Connect page gives you the exact
    SillyTavern settings and a one-line connect code for pockettavern on your phone.
@@ -87,7 +87,7 @@ pockettavern ─┘        │  quota engine    2. gemini-2.5-flash-lite   ← t
 
 ```powershell
 # requires Dart SDK 3.x
-powershell -ExecutionPolicy Bypass -File tool/build.ps1 -Version 0.2.0
+powershell -ExecutionPolicy Bypass -File tool/build.ps1 -Version 0.2.3
 # → build/eatgemini.exe (build script runs tests + release checks itself)
 ```
 

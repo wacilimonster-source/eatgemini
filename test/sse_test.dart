@@ -31,6 +31,17 @@ void main() {
     expect(events.map((e) => e.data).toList(), ['{"a":1}', '{"b":2}']);
   });
 
+  test('DONE 前缺空行时先交付残留完成帧', () async {
+    final events = await _collect(_chunks([
+      'data: {"choices":[{"delta":{"content":"答案"},"finish_reason":"stop"}]}\n',
+      'data: [DONE]\n\n',
+    ]));
+    expect(events, hasLength(2));
+    expect(events.first.isDone, isFalse);
+    expect(jsonDecode(events.first.data)['choices'][0]['finish_reason'], 'stop');
+    expect(events.last.isDone, isTrue);
+  });
+
   test('多行 data 用换行连接', () async {
     final events = await _collect(_chunks([
       'data: {"a":\ndata: 1}\n\n',

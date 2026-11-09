@@ -21,6 +21,8 @@ class RequestSummary {
     this.profile,
     this.servedModel,
     this.errorCode,
+    this.streamErrorCode,
+    this.routeDiagnostics,
     this.firstEventMs,
     this.remoteIp,
     this.transforms = const [],
@@ -38,6 +40,10 @@ class RequestSummary {
   final String outcome;
   final int httpStatus;
   final String? errorCode;
+
+  /// 提交后断流：已返回 200 并转发途中，上游流不完整或出错时下发的错误帧码。
+  final String? streamErrorCode;
+  final Map<String, Object?>? routeDiagnostics;
   final int upstreamAttempts;
   final bool fellBack;
   final bool cancelled;
@@ -59,6 +65,8 @@ class RequestSummary {
         'outcome': outcome,
         'httpStatus': httpStatus,
         if (errorCode != null) 'errorCode': errorCode,
+        if (streamErrorCode != null) 'streamErrorCode': streamErrorCode,
+        if (routeDiagnostics != null) 'routeDiagnostics': routeDiagnostics,
         if (servedModel != null) 'servedModel': servedModel,
         'fellBack': fellBack,
         'attempts': upstreamAttempts,
@@ -88,7 +96,6 @@ class StaticTokenDirectory implements TokenDirectory {
   @override
   String? clientIdForToken(String token) {
     String? matched;
-    var diff = 0;
     for (final e in _tokens.entries) {
       final a = e.value;
       final b = token;
@@ -99,10 +106,9 @@ class StaticTokenDirectory implements TokenDirectory {
         final cb = i < b.length ? b.codeUnitAt(i) : 0;
         localDiff |= ca ^ cb;
       }
+      // 每个令牌独立判断：不能把其他条目的差异累加进来（G12）。
       if (localDiff == 0) matched = e.key;
-      diff |= localDiff;
     }
-    if (diff != 0) return null;
     return matched;
   }
 }
@@ -123,8 +129,7 @@ typedef AttemptSink = void Function(AttemptEvent event);
 class RequestAbortRegistry {
   final Map<String, AbortToken> _tokens = {};
 
-  AbortToken register(String requestId) =>
-      _tokens[requestId] = AbortToken();
+  AbortToken register(String requestId) => _tokens[requestId] = AbortToken();
 
   void abort(String requestId) => _tokens.remove(requestId)?.abort();
 

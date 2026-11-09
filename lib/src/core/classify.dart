@@ -325,6 +325,7 @@ _Envelope _tryParseEnvelope(String body) {
   } catch (_) {
     return _Envelope(message: _clip(body));
   }
+  if (decoded is List && decoded.length == 1) decoded = decoded.single;
   if (decoded is! Map) return _Envelope(message: _clip(body));
   final error = decoded['error'];
   final map = error is Map ? error.cast<String, Object?>() : decoded;

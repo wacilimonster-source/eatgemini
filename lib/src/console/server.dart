@@ -83,8 +83,12 @@ class ConsoleServer {
   String? _ticket;
   DateTime? _ticketExpires;
   final Map<String, String> _sessions = {}; // session -> csrf
+  int _sseCount = 0;
 
   int get port => _server?.port ?? 0;
+
+  /// 当前控制台 SSE 连接数（0 = 监控窗口已关闭，供托盘关窗检测 §4.4）。
+  int get sseConnections => _sseCount;
 
   Future<void> start() async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -257,39 +261,73 @@ class ConsoleServer {
     await req.response.close();
   }
 
+  /// SSE 实时事件流（监控页 `EventSource('/api/events')`）。
+  ///
+  /// Windows 上有个关键坑：客户端断开后，HttpResponse 的写入会静默成功、
+  /// `res.done` 永不完成（实测裸 HttpClient/EventSource 消失后 ping 十几分钟
+  /// 仍无错误），SSE 计数永远不回落 → 托盘的关窗检测（§4.4）彻底失效。
+  /// 因此这里先发头帧后 `detachSocket`，改在原生 socket 上写流：
+  /// `onDone`/`onError` 可靠感知断连（FIN 与 RST 均触发，已实测）。
+  ///
+  /// detach 前必须关掉分块编码（无 Content-Length 的 HTTP/1.1 默认 chunked），
+  /// 否则客户端会按 chunked 解析 detach 后的裸字节。改用 close-delimited：
+  /// 连接只在服务端退出时关闭，EventSource 断线自动重连的行为不变。
   Future<void> _handleEvents(HttpRequest req) async {
     final res = req.response;
     res.statusCode = 200;
     res.headers.set('content-type', 'text/event-stream; charset=utf-8');
     res.headers.set('cache-control', 'no-cache, no-transform');
     res.headers.set('x-accel-buffering', 'no');
+    res.headers.set('connection', 'close');
+    res.persistentConnection = false;
+    res.headers.chunkedTransferEncoding = false;
     res.bufferOutput = false;
     await res.flush();
 
-    // 首帧：会话可用标志。
-    res.write('event: hello\ndata: {"api":$kApiVersion}\n\n');
-    await res.flush();
+    final socket = await res.detachSocket();
+    _sseCount++;
 
-    final sub = host.events().listen((event) {
+    StreamSubscription<(String, Map<String, Object?>)>? sub;
+    Timer? heartbeat;
+    var closed = false;
+    void cleanup() {
+      if (closed) return;
+      closed = true;
+      _sseCount--;
+      heartbeat?.cancel();
+      unawaited(sub?.cancel());
       try {
-        res.write('event: ${event.$1}\ndata: ${jsonEncode(event.$2)}\n\n');
-        res.flush();
+        socket.destroy();
       } catch (_) {}
-    });
-    final heartbeat = Timer.periodic(const Duration(seconds: 15), (_) {
-      try {
-        res.write(': ping\n\n');
-        res.flush();
-      } catch (_) {}
-    });
-
-    try {
-      await res.done;
-    } catch (_) {
-    } finally {
-      heartbeat.cancel();
-      await sub.cancel();
     }
+
+    void send(String frame) {
+      if (closed) return;
+      try {
+        // 只 write 不 flush：detach 后的 IOSink 在内部 addStream 未完成时调
+        // flush 会抛 "StreamSink is bound to a stream"（竞态），而原生 socket
+        // 的写队列本就会在事件循环里自动排空，无需显式 flush。
+        socket.write(frame);
+      } catch (_) {
+        cleanup();
+      }
+    }
+
+    // 首帧：会话可用标志。
+    send('event: hello\ndata: {"api":$kApiVersion}\n\n');
+
+    sub = host.events().listen((event) {
+      send('event: ${event.$1}\ndata: ${jsonEncode(event.$2)}\n\n');
+    });
+    heartbeat = Timer.periodic(const Duration(seconds: 15), (_) {
+      send(': ping\n\n');
+    });
+    socket.listen(
+      (_) {},
+      onDone: cleanup,
+      onError: (Object _) => cleanup,
+      cancelOnError: true,
+    );
   }
 
   Future<void> _handleApi(HttpRequest req, String path) async {
@@ -488,11 +526,22 @@ class ConsoleServer {
   EmbeddedAsset? _diskAsset(String key) {
     try {
       final rel = key.replaceFirst('/ui/', '');
-      final file = File('assets/ui/$rel');
+      // 先按 URI 规则归一化 ..，再确认仍位于 assets/ui 内；同时拒绝
+      // Windows 反斜杠/盘符，避免 `/ui/..\..\pubspec.yaml` 逃逸（G8）。
+      final normalized = Uri(path: '/ui/$rel').normalizePath().path;
+      if (!normalized.startsWith('/ui/')) return null;
+      final safeRel = normalized.substring('/ui/'.length);
+      if (safeRel.isEmpty ||
+          safeRel.contains('\\') ||
+          safeRel.contains(':') ||
+          safeRel.contains('\u0000')) {
+        return null;
+      }
+      final file = File('assets/ui/$safeRel');
       if (!file.existsSync()) return null;
       final bytes = file.readAsBytesSync();
       return EmbeddedAsset(
-        mime: _mimeOf(rel),
+        mime: _mimeOf(safeRel),
         bytes: bytes,
         etag: 'w${bytes.length}',
       );
@@ -506,6 +555,7 @@ class ConsoleServer {
     if (name.endsWith('.css')) return 'text/css; charset=utf-8';
     if (name.endsWith('.js')) return 'text/javascript; charset=utf-8';
     if (name.endsWith('.svg')) return 'image/svg+xml';
+    if (name.endsWith('.ico')) return 'image/x-icon';
     if (name.endsWith('.json')) return 'application/json; charset=utf-8';
     return 'application/octet-stream';
   }

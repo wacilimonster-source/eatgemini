@@ -16,6 +16,7 @@ import '../core/config.dart';
 import '../core/router_engine.dart';
 import '../core/telemetry.dart';
 import '../quota/quota.dart';
+import 'admission.dart';
 
 class GatewayServer {
   GatewayServer({
@@ -52,7 +53,7 @@ class GatewayServer {
   final String appVersion;
 
   HttpServer? _server;
-  final _Admission _admission = _Admission();
+  final Admission _admission = Admission();
   final _AuthRateLimiter _authLimiter = _AuthRateLimiter();
 
   /// 当前实际监听的地址与端口。
@@ -365,6 +366,7 @@ class GatewayServer {
 
     await _json(request, 200, {
       'api': kApiVersion,
+      'capabilities': {'thoughtSummaries': true},
       'app': {'state': appStatus().state, 'reason': appStatus().reason},
       'quotaDay': {
         'day': snapshot['quotaDay'],
@@ -464,6 +466,13 @@ class GatewayServer {
 
     // 取消信号：客户端断开时置位。
     final token = AbortToken();
+    // 下游响应结束或连接异常：尽力中止上游生成，避免客户端停止生成后
+    // 网关继续读 SSE 消耗额度（S1）。正常完成时本回调也会置位，此时
+    // 上游已经结束，不影响结果。
+    unawaited(request.response.done.then<void>(
+      (_) => token.abort(),
+      onError: (Object _) => token.abort(),
+    ));
     onEvent?.call('request.started', {
       'requestId': requestId,
       'client': clientId,
@@ -473,6 +482,7 @@ class GatewayServer {
     });
 
     RouteResult result;
+    var holdsAdmission = false;
     try {
       result = await _engine().route(RouteInput(
         clientId: clientId,
@@ -484,8 +494,10 @@ class GatewayServer {
         abort: token,
         onAttempt: onAttempt,
       ));
+      // 流式请求的名额要保留到中继结束：route() 返回时只是刚提交首帧。
+      holdsAdmission = result is RouteStreamResult;
     } finally {
-      _admission.release(clientId);
+      if (!holdsAdmission) _admission.release(clientId);
     }
 
     final firstEventMs = clock().difference(started).inMilliseconds;
@@ -522,8 +534,9 @@ class GatewayServer {
               'x-router-attempts': '${trace.upstreamAttempts}',
           };
           var committed = false;
-          Map<String, Object?>? usage;
           var outcome = 'succeeded';
+          // 跨 TCP 块维护行缓冲：SSE 帧被切块时 usage / error 仍能识别。
+          final sniffer = StreamSniffer();
           try {
             request.response.statusCode = r.status;
             // Windows 上 HttpResponse 默认 bufferOutput=true，flush() 不会把
@@ -534,11 +547,16 @@ class GatewayServer {
             await request.response.flush();
             committed = true;
             await for (final chunk in r.body) {
-              usage = _sniffUsage(chunk, usage);
+              if (token.isAborted) break;
+              sniffer.feed(chunk);
               request.response.add(chunk);
               await request.response.flush();
             }
-            await request.response.close();
+            sniffer.flush();
+            if (token.isAborted) outcome = 'cancelled';
+            try {
+              await request.response.close();
+            } catch (_) {}
           } catch (_) {
             outcome =
                 committed ? 'failed_after_commit' : 'failed_before_commit';
@@ -546,6 +564,8 @@ class GatewayServer {
             try {
               await request.response.close();
             } catch (_) {}
+          } finally {
+            _admission.release(clientId);
           }
           _emitSummary(
             requestId: requestId,
@@ -557,7 +577,8 @@ class GatewayServer {
             outcome: outcome,
             httpStatus: r.status,
             firstEventMs: firstEventMs,
-            usage: usage,
+            usage: sniffer.usage,
+            streamErrorCode: sniffer.errorCode,
           );
           return;
         }
@@ -595,6 +616,7 @@ class GatewayServer {
     required int httpStatus,
     required int firstEventMs,
     String? errorCode,
+    String? streamErrorCode,
     Map<String, Object?>? usage,
   }) {
     final summary = RequestSummary(
@@ -608,6 +630,8 @@ class GatewayServer {
       outcome: outcome,
       httpStatus: httpStatus,
       errorCode: errorCode,
+      streamErrorCode: streamErrorCode,
+      routeDiagnostics: trace.toJson(),
       upstreamAttempts: trace.upstreamAttempts,
       fellBack: trace.fellBack,
       cancelled: outcome == 'cancelled',
@@ -625,30 +649,6 @@ class GatewayServer {
   Map<String, Object?>? _usageOf(Map<String, Object?> json) {
     final usage = json['usage'];
     return usage is Map ? usage.cast<String, Object?>() : null;
-  }
-
-  /// 从下游 SSE 块里窥探 usage（只用于统计，不改写内容）。
-  Map<String, Object?>? _sniffUsage(
-    List<int> chunk,
-    Map<String, Object?>? current,
-  ) {
-    if (chunk.isEmpty) return current;
-    try {
-      final text = utf8.decode(chunk, allowMalformed: true);
-      final idx = text.indexOf('"usage"');
-      if (idx < 0) return current;
-      for (final line in text.split('\n')) {
-        if (!line.startsWith('data: ')) continue;
-        final payload = line.substring(6).trim();
-        if (payload == '[DONE]' || !payload.contains('"usage"')) continue;
-        final decoded = jsonDecode(payload);
-        if (decoded is Map) {
-          final usage = decoded['usage'];
-          if (usage is Map) return usage.cast<String, Object?>();
-        }
-      }
-    } catch (_) {}
-    return current;
   }
 
   Future<Uint8List?> _readBody(HttpRequest request, int maxBytes) async {
@@ -725,56 +725,66 @@ class GatewayServer {
   }
 }
 
-class _Admission {
-  int _inFlight = 0;
-  final Map<String, int> _perClient = {};
-  final List<Completer<bool>> _waiters = [];
+/// 从下游 SSE 字节流里窥探 usage 与错误码，只用于统计，不改写内容。
+///
+/// SSE 帧可能被 TCP 切成任意块；这里维护行缓冲，只解析完整行。
+class StreamSniffer {
+  final StringBuffer _pending = StringBuffer();
+  Map<String, Object?>? usage;
+  String? errorCode;
 
-  Future<bool> acquire({
-    required String clientId,
-    required int maxGlobal,
-    required int maxPerClient,
-    required int maxQueue,
-    required int maxQueuePerClient,
-    required int maxWaitMs,
-  }) async {
-    final perClient = _perClient[clientId] ?? 0;
-    if (_inFlight < maxGlobal && perClient < maxPerClient) {
-      _take(clientId);
-      return true;
-    }
-    if (_waiters.length >= maxQueue) return false;
-    final completer = Completer<bool>();
-    _waiters.add(completer);
-    Timer(Duration(milliseconds: maxWaitMs), () {
-      if (!completer.isCompleted) {
-        _waiters.remove(completer);
-        completer.complete(false);
-      }
-    });
-    // 排队等待释放：由 release 唤醒。
-    return completer.future;
-  }
-
-  void _take(String clientId) {
-    _inFlight++;
-    _perClient[clientId] = (_perClient[clientId] ?? 0) + 1;
-  }
-
-  void release(String clientId) {
-    _inFlight = _inFlight > 0 ? _inFlight - 1 : 0;
-    final next = (_perClient[clientId] ?? 1) - 1;
-    if (next <= 0) {
-      _perClient.remove(clientId);
-    } else {
-      _perClient[clientId] = next;
-    }
-    while (_waiters.isNotEmpty) {
-      final waiter = _waiters.removeAt(0);
-      if (waiter.isCompleted) continue;
-      _take(clientId);
-      waiter.complete(true);
+  void feed(List<int> chunk) {
+    if (chunk.isEmpty) return;
+    _pending.write(utf8.decode(chunk, allowMalformed: true));
+    final text = _pending.toString();
+    final cut = text.lastIndexOf('\n');
+    if (cut < 0) {
+      // 异常超长行：避免无限累积。
+      if (text.length > 256 * 1024) _pending.clear();
       return;
+    }
+    _pending
+      ..clear()
+      ..write(text.substring(cut + 1));
+    _consume(text.substring(0, cut + 1));
+  }
+
+  /// 流结束时处理没有换行符结尾的残余行。
+  void flush() {
+    if (_pending.isEmpty) return;
+    final text = _pending.toString();
+    _pending.clear();
+    _consume(text);
+  }
+
+  void _consume(String text) {
+    for (final raw in text.split('\n')) {
+      final line = raw.endsWith('\r')
+          ? raw.substring(0, raw.length - 1)
+          : raw;
+      if (!line.startsWith('data: ')) continue;
+      final payload = line.substring(6).trim();
+      if (payload.isEmpty || payload == '[DONE]') continue;
+      final needUsage = usage == null && payload.contains('"usage"');
+      final needError = errorCode == null && payload.contains('"error"');
+      if (!needUsage && !needError) continue;
+      try {
+        final decoded = jsonDecode(payload);
+        if (decoded is! Map) continue;
+        if (needUsage) {
+          final value = decoded['usage'];
+          if (value is Map) usage = value.cast<String, Object?>();
+        }
+        if (needError) {
+          final error = decoded['error'];
+          if (error is Map) {
+            final code = error['code']?.toString();
+            if (code != null && code.isNotEmpty) errorCode = code;
+          }
+        }
+      } catch (_) {
+        // 半截帧或非 JSON：留给后续块，不当作错误。
+      }
     }
   }
 }

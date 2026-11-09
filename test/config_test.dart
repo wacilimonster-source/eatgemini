@@ -89,5 +89,19 @@ void main() {
       ((json['policy'] as Map))['defaultProfile'] = 'nope';
       expect(() => decodeConfig(json), throwsA(isA<ConfigException>()));
     });
+
+    test('非法监听地址被拒绝', () {
+      final json = base();
+      (json['listen'] as Map)['bindAddress'] = 'http://bad address';
+      expect(() => decodeConfig(json), throwsA(isA<ConfigException>()));
+    });
+
+    test('合法监听 IP / 主机名可以通过', () {
+      final json = base();
+      (json['listen'] as Map)['bindAddress'] = '192.168.1.10';
+      expect(decodeConfig(json).listen.bindAddress, '192.168.1.10');
+      (json['listen'] as Map)['bindAddress'] = 'localhost';
+      expect(decodeConfig(json).listen.bindAddress, 'localhost');
+    });
   });
 }

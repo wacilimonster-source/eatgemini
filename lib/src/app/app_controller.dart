@@ -16,6 +16,7 @@ import '../core/router_engine.dart';
 import '../http/gateway_server.dart';
 import '../core/telemetry.dart';
 import '../desktop/browser_launcher.dart';
+import '../desktop/tray_coordinator.dart';
 import '../observe/observability.dart';
 import '../quota/quota.dart';
 import '../secrets/dpapi.dart';
@@ -67,9 +68,17 @@ class AppController implements ConsoleHost {
   bool _portError = false;
   bool _degraded = false;
   bool _stopping = false;
+  bool _loggerReady = false;
+  TrayCoordinator? _tray;
+  Timer? _trayTimer;
+  String? _lastTrayState;
   String? _configErrorMessage;
   String? _portErrorMessage;
   UpstreamCheck? _lastCheck;
+  DateTime _startedAt = DateTime.now().toUtc();
+  ListenConfig? _activeListen;
+  bool _transportReady = false;
+  final List<DartIoTransport> _retiredTransports = [];
   final Map<String, Map<String, Object?>> _inflight = {};
   final Map<String, Map<String, Object?>> _lastSeen = {};
   final Completer<int> _exitCode = Completer<int>();
@@ -80,6 +89,7 @@ class AppController implements ConsoleHost {
   // ---------------------------------------------------------------- 启动
 
   Future<int> start(AppOptions options) async {
+    _startedAt = DateTime.now().toUtc();
     dataDir = DataDir.resolve(
       override: options.dataDirOverride,
       executablePath: Platform.resolvedExecutable,
@@ -110,7 +120,7 @@ class AppController implements ConsoleHost {
       },
     );
     await logger.init();
-    bus = EventBus();
+    _loggerReady = true;
     vault = SecretVault(
       directory: dataDir.root,
       dpapi: defaultDpapi(),
@@ -127,16 +137,26 @@ class AppController implements ConsoleHost {
     try {
       config = configStore.load();
     } on ConfigException catch (e) {
-      _configError = true;
-      _configErrorMessage = e.messages.join('；');
+      final problem = e.messages.join('；');
       final recovered = configStore.tryRecover();
       if (recovered != null) {
         config = recovered;
-        logger.warn('配置无效，已用备份继续：$_configErrorMessage', tag: 'config');
+        // 恢复成功就不再是错误态，并把可用配置写回主文件；坏文件改名
+        // 保留，避免每次启动都重复走恢复流程（G1）。
+        try {
+          configStore.replaceCorruptWith(recovered);
+          logger.warn('配置无效，已从备份恢复并写回：$problem', tag: 'config');
+        } catch (writeError) {
+          _configError = true;
+          _configErrorMessage = problem;
+          logger.warn('配置无效，已用备份继续（写回失败：$writeError）：$problem',
+              tag: 'config');
+        }
       } else {
+        _configError = true;
+        _configErrorMessage = problem;
         config = defaultConfig();
-        logger.error('配置无效且没有备份，使用默认配置：$_configErrorMessage',
-            tag: 'config');
+        logger.error('配置无效且没有备份，使用默认配置：$problem', tag: 'config');
       }
     } catch (e) {
       _configError = true;
@@ -150,6 +170,8 @@ class AppController implements ConsoleHost {
       redactor: redactor,
       retentionDays: config.logging.retentionDays,
     );
+    // 请求日志的 retentionDays 之前没有任何清理入口（G5）。
+    requestLog.cleanupOld();
 
     quota = QuotaManager(config: () => config, store: _FileStateStore(dataDir));
     await quota.load();
@@ -200,6 +222,9 @@ class AppController implements ConsoleHost {
       preferred: config.desktop.browser,
     );
 
+    // ---- 托盘（F12/§14）：关窗后收纳进任务栏托盘，可唤回 / 复制网关 / 退出 ----
+    await _startTray();
+
     // 后台连通性检查（不生成）。
     if (vault.hasUpstreamKey) {
       unawaited(_backgroundCheck());
@@ -225,21 +250,41 @@ class AppController implements ConsoleHost {
       await gatewayStart();
       _portError = false;
       _portErrorMessage = null;
-    } on SocketException catch (e) {
+      // 绑定成功后刷新一次局域网地址：冷启动与切换监听都走这里（G2）。
+      await refreshLanAddresses();
+    } catch (e) {
+      // 不只是 SocketException：非法绑定地址等会抛 ArgumentError。
       _portError = true;
+      final detail =
+          e is SocketException ? (e.osError?.message ?? e.message) : e.toString();
       _portErrorMessage =
-          '端口 ${config.listen.port} 被占用或无法监听（${e.osError?.message ?? e.message}），'
+          '端口 ${config.listen.port}（${config.listen.host}）无法监听：$detail，'
           '请在「接入」页换一个端口';
       logger.error(_portErrorMessage!, tag: 'gateway');
     }
   }
 
   Future<void> gatewayStart() async {
+    final previous = _activeListen;
     await gateway.stop();
-    await gateway.start(config.listen);
+    try {
+      await gateway.start(config.listen);
+      _activeListen = config.listen;
+    } catch (e) {
+      _activeListen = null;
+      // 新配置绑定失败时尽量回到上一次可用的监听，避免网关直接停机。
+      if (previous != null) {
+        try {
+          await gateway.start(previous);
+          _activeListen = previous;
+        } catch (_) {}
+      }
+      rethrow;
+    }
   }
 
   void _rebuildCore() {
+    final previous = _transportReady ? transport : null;
     transport = DartIoTransport(
       config: () => config,
       egress: AllowlistEgress(allowedHosts: {_upstreamUri().host.toLowerCase()}),
@@ -250,9 +295,29 @@ class AppController implements ConsoleHost {
       quota: quota,
       upstreamApiKey: () => vault.upstreamKey?.value ?? '',
     );
+    _transportReady = true;
+    // 旧 HttpClient 的 keep-alive 连接无人释放；等在途请求结束后关闭（G6）。
+    if (previous != null) _retireTransport(previous);
     // GatewayServer 只在 start() 创建一次：它的引用全是 getter，
     // 热加载只换 transport/engine。重建它会导致旧 HttpServer 泄漏
     // （实测：改端口后 8787/8789 同时监听）。
+  }
+
+  void _retireTransport(DartIoTransport old) {
+    if (_inflight.isEmpty) {
+      unawaited(old.close());
+      return;
+    }
+    _retiredTransports.add(old);
+  }
+
+  void _closeRetiredTransportsIfIdle() {
+    if (_inflight.isNotEmpty || _retiredTransports.isEmpty) return;
+    final retired = List<DartIoTransport>.of(_retiredTransports);
+    _retiredTransports.clear();
+    for (final old in retired) {
+      unawaited(old.close());
+    }
   }
 
   Uri _upstreamUri() => Uri.parse(config.upstream.baseUrl);
@@ -269,6 +334,12 @@ class AppController implements ConsoleHost {
   }
 
   // ---------------------------------------------------------------- 状态
+
+  /// 库内 print / zone 未捕获输出：Logger 就绪后落盘（M5）。
+  void logPrint(String line) {
+    if (!_loggerReady) return;
+    logger.info(line, tag: 'print');
+  }
 
   AppStatus appStatus() {
     if (_stopping) return const AppStatus('stopping');
@@ -300,7 +371,7 @@ class AppController implements ConsoleHost {
         'state': appStatus().state,
         'reason': appStatus().reason,
         'version': version,
-        'startedAt': now.toIso8601String(),
+        'startedAt': _startedAt.toIso8601String(),
       },
       'gateway': {
         'listenMode': config.listen.mode.name,
@@ -325,7 +396,13 @@ class AppController implements ConsoleHost {
   }
 
   Map<String, Object?> _todayStats() {
-    final items = requestLog.entries;
+    final now = DateTime.now().toUtc();
+    final today = quota.clock.dayKey(now);
+    // 内存记录最多 500 条且可跨天：必须按太平洋日期过滤，不能全量计数。
+    final items = requestLog.entries.where((r) {
+      final started = DateTime.tryParse((r['startedAt'] ?? '').toString());
+      return started != null && quota.clock.dayKey(started.toUtc()) == today;
+    }).toList();
     var succeeded = 0;
     var failed = 0;
     var attempts = 0;
@@ -338,13 +415,24 @@ class AppController implements ConsoleHost {
       }
       attempts += (r['attempts'] as num?)?.toInt() ?? 0;
     }
+    // 结果不确定的尝试由配额桶按日累计（RPD 桶每个模型/配额组一份）。
+    final quotaSnap = quota.snapshot(now);
+    final buckets = (quotaSnap['buckets'] as Map).cast<String, Object?>();
+    var uncertain = 0;
+    for (final value in buckets.values) {
+      final bucket =
+          value is Map ? value.cast<String, Object?>() : const <String, Object?>{};
+      if (bucket['dimension'] == QuotaDimension.rpd.name) {
+        uncertain += (bucket['uncertainAttempts'] as num?)?.toInt() ?? 0;
+      }
+    }
     return {
       'requests': items.length,
       'succeeded': succeeded,
       'failed': failed,
       'upstreamAttempts': attempts,
       'fellBack': items.where((r) => r['fellBack'] == true).length,
-      'uncertainAttempts': 0,
+      'uncertainAttempts': uncertain,
     };
   }
 
@@ -510,6 +598,7 @@ class AppController implements ConsoleHost {
         };
       case 'request.finished':
         _inflight.remove(data['requestId'].toString());
+        _closeRetiredTransportsIfIdle();
       case 'log':
         break;
       default:
@@ -549,6 +638,13 @@ class AppController implements ConsoleHost {
       '${summary.totalMs}ms',
       tag: 'gateway',
     );
+    if (summary.streamErrorCode != null) {
+      logger.warn(
+        '${summary.requestId} 提交后断流 stream=${summary.streamErrorCode} '
+        '→ ${summary.servedModel ?? '-'} ${summary.totalMs}ms',
+        tag: 'gateway',
+      );
+    }
   }
 
   // ---------------------------------------------------------------- 控制台：查询
@@ -929,6 +1025,67 @@ class AppController implements ConsoleHost {
 
   // ---------------------------------------------------------------- 窗口与退出
 
+  /// 启动托盘并周期同步状态（§14：主 → 托盘 {state, tooltip}）。
+  Future<void> _startTray() async {
+    final tray = TrayCoordinator(
+      onOpenWindow: openWindow,
+      onExit: requestExit,
+      onFirstCloseHint: _markCloseHintShown,
+      log: (line) => logger.info(line, tag: 'tray'),
+    );
+    _tray = tray;
+    await tray.start();
+    logger.info(tray.running ? '托盘已就绪' : '托盘不可用（非 Windows 或启动失败）',
+        tag: 'tray');
+    _pushTrayState();
+    _trayTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (_stopping) return;
+      _pushTrayState();
+      tray.tick(now: DateTime.now(), sseConnections: console.sseConnections);
+    });
+  }
+
+  void _pushTrayState() {
+    final tray = _tray;
+    if (tray == null) return;
+    final status = appStatus();
+    final todayRequests = _todayStats()['requests'] as int;
+    tray.update(
+      state: status.state,
+      todayRequests: todayRequests,
+      gatewayUrl: gatewayBaseUrl,
+    );
+    // 首次进入错误态时气泡提醒（F12；额度用完不弹，避免打扰）。
+    if (_lastTrayState != status.state) {
+      if (!_isErrorState(_lastTrayState) &&
+          _isErrorState(status.state) &&
+          status.reason != null) {
+        tray.showBalloon(
+          level: 'error',
+          title: 'eatgemini 出现问题',
+          text: status.reason!,
+        );
+      }
+      _lastTrayState = status.state;
+    }
+  }
+
+  bool _isErrorState(String? state) =>
+      state == 'config_error' ||
+      state == 'port_conflict' ||
+      state == 'persist_error';
+
+  /// 首次关窗气泡已弹过，持久化（之后不再提示）。
+  void _markCloseHintShown() {
+    if (config.desktop.closeHintShown) return;
+    final next = config.copyWith(
+      desktop: config.desktop.copyWith(closeHintShown: true),
+    );
+    config = next;
+    configStore.write(next);
+    logger.info('已记录关窗提示（closeHintShown）', tag: 'tray');
+  }
+
   @override
   Future<Map<String, Object?>> setListen({String? mode, int? port}) async {
     final nextListen = ListenConfig(
@@ -941,7 +1098,6 @@ class AppController implements ConsoleHost {
     config = next;
     _rebuildCore();
     await _startGateway();
-    await refreshLanAddresses();
     bus.emit('config.changed', {'revision': configStore.revision});
     return {
       'ok': !_portError,
@@ -981,9 +1137,16 @@ class AppController implements ConsoleHost {
     await console.stop();
     await quota.flushNow();
     await logger.close();
-    await transport.close();
+    if (_transportReady) await transport.close();
+    for (final old in _retiredTransports) {
+      await old.close();
+    }
+    _retiredTransports.clear();
     SingleInstance.clearInstance(dataDir);
     _instance?.dispose();
+    // 托盘图标最后移除（§14：内核状态落盘 → 移除图标 → 释放）。
+    _trayTimer?.cancel();
+    await _tray?.stop();
     if (!_exitCode.isCompleted) _exitCode.complete(0);
   }
 
@@ -993,8 +1156,8 @@ class AppController implements ConsoleHost {
     final uri = Uri.parse('${config.upstream.baseUrl}models');
     final client = HttpClient()
       ..connectionTimeout =
-          Duration(milliseconds: config.upstream.connectTimeoutMs)
-      ..findProxy = _proxyResolver();
+          Duration(milliseconds: config.upstream.connectTimeoutMs);
+    applyProxyToClient(client, config.upstream.proxy);
     try {
       final req = await client.getUrl(uri);
       req.headers.set('authorization', 'Bearer $key');
@@ -1071,9 +1234,6 @@ class AppController implements ConsoleHost {
       client.close(force: true);
     }
   }
-
-  String Function(Uri) _proxyResolver() =>
-      findProxyResolver(config.upstream.proxy);
 
   static String _clip(String s) {
     final t = s.replaceAll(RegExp(r'\s+'), ' ').trim();
@@ -1172,7 +1332,11 @@ class _FileStateStore implements StateStore {
     await tmp.writeAsString(jsonEncode(data), flush: true);
     if (_file.existsSync()) {
       try {
-        await _file.rename('${_file.path}.bak');
+        final bak = File('${_file.path}.bak');
+        // Windows 上 rename 不会覆盖已存在的目标；先删旧备份，
+        // 否则 .bak 永远停留在第一次成功时的状态（M6）。
+        if (bak.existsSync()) await bak.delete();
+        await _file.rename(bak.path);
       } catch (_) {}
     }
     try {

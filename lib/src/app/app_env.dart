@@ -89,6 +89,23 @@ class ConfigStore {
     }
   }
 
+  /// 恢复成功后把可用配置写回主文件，并把坏文件保留为 `.corrupt-*`。
+  void replaceCorruptWith(RouterConfig config) {
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    if (dataDir.configFile.existsSync()) {
+      try {
+        dataDir.configFile.renameSync(
+          '${dataDir.configFile.path}.corrupt-$stamp',
+        );
+      } catch (_) {
+        try {
+          dataDir.configFile.deleteSync();
+        } catch (_) {}
+      }
+    }
+    write(config);
+  }
+
   void write(RouterConfig config) {
     // 写完即校验一次，防止把非法快照落盘。
     final encoded = config.encode();

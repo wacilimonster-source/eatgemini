@@ -113,6 +113,111 @@ void main() {
     final afterBuckets = (after['buckets'] as Map).cast<String, Object?>();
     expect((afterBuckets['flash38:rpd'] as Map)['localAttempts'], 0);
   });
+
+  test('RPD 探测放行后必须重新等满间隔', () {
+    const model = 'gemini-2.5-flash-lite';
+    var t = noonPst;
+    for (var i = 0; i < 20; i++) {
+      expect(quota.reserve(model, 10, t), isNotNull);
+      t = t.add(const Duration(seconds: 7));
+    }
+    expect(quota.check(model, 10, t)!.reason, 'daily_suspected');
+
+    final probeAt = t.add(const Duration(minutes: 6));
+    expect(quota.reserve(model, 10, probeAt, allowProbe: true), isNotNull);
+    // 紧接着再次探测：必须被节流（修复前 lastProbeMs 只写一次，会放行）。
+    expect(
+      quota.reserve(model, 10, probeAt.add(const Duration(seconds: 1)),
+          allowProbe: true),
+      isNull,
+    );
+    // 满一个间隔后允许下一次探测。
+    expect(
+      quota.reserve(model, 10, probeAt.add(const Duration(minutes: 5)),
+          allowProbe: true),
+      isNotNull,
+    );
+  });
+
+  test('RPD 桶不累积分钟事件，也不会写进状态文件', () {
+    const model = 'gemini-2.5-flash-lite';
+    quota.reserve(model, 10, noonPst);
+    final snapshot = quota.snapshot(noonPst);
+    final buckets = (snapshot['buckets'] as Map).cast<String, Object?>();
+    expect((buckets['lite25:rpd'] as Map)['minuteEvents'], isEmpty);
+    expect((buckets['lite25:rpd'] as Map)['minuteUsed'], 0);
+    expect((buckets['lite25:rpm'] as Map)['minuteUsed'], 1);
+
+    final persisted = (quota.toJson()['buckets'] as Map)['lite25:rpd'] as Map;
+    expect(persisted['minuteEvents'], isEmpty);
+  });
+
+  test('切换项目时不沿用旧项目的项目级封锁', () async {
+    final store = MemoryStateStore();
+    var config = defaultConfig().copyWith(projectRef: 'old-project');
+    final manager = QuotaManager(config: () => config, store: store);
+    await manager.load();
+    manager.applyFailure(
+      'gemini-3.8-flash',
+      const UpstreamFailure(
+        kind: FailureKind.upstreamAccessError,
+        status: 401,
+        message: 'API key not valid',
+      ),
+      noonPst,
+    );
+    expect(manager.check('gemini-3.8-flash', 0, noonPst)!.reason,
+        'project_blocked');
+    await manager.flushNow();
+
+    // 模拟 quarantineStateForNewProject：同一个 manager 重新 load()。
+    config = config.copyWith(projectRef: 'new-project');
+    await manager.load();
+    expect(manager.check('gemini-3.8-flash', 0, noonPst)?.reason,
+        isNot('project_blocked'));
+  });
+
+  test('clearAllLocalEstimates 保留模型级冷却与项目级封锁', () {
+    const model = 'gemini-3.8-flash';
+    final r = quota.reserve(model, 100, noonPst)!;
+    quota.applyFailure(
+      model,
+      const UpstreamFailureForTest.unknown429(),
+      noonPst,
+      reservation: r,
+    );
+    quota.clearAllLocalEstimates();
+    expect(quota.check(model, 100, noonPst)!.reason, 'model_blocked');
+
+    final other = QuotaManager(config: () => config, store: MemoryStateStore());
+    other.applyFailure(
+      'gemini-3.6-flash',
+      const UpstreamFailure(
+        kind: FailureKind.upstreamAccessError,
+        status: 401,
+        message: 'bad key',
+      ),
+      noonPst,
+    );
+    other.clearAllLocalEstimates();
+    expect(other.check('gemini-3.6-flash', 0, noonPst)!.reason,
+        'project_blocked');
+  });
+
+  test('releaseUnsent 只移除本次预留的分钟事件', () {
+    const model = 'gemini-3.8-flash';
+    final first = quota.reserve(model, 10, noonPst)!;
+    final secondAt = noonPst.add(const Duration(seconds: 1));
+    final second = quota.reserve(model, 10, secondAt)!;
+    expect(second, isNotNull);
+
+    quota.releaseUnsent(first);
+    final buckets = (quota.snapshot(secondAt)['buckets'] as Map)
+        .cast<String, Object?>();
+    final events =
+        ((buckets['flash38:rpm'] as Map)['minuteEvents'] as List).cast<int>();
+    expect(events, [secondAt.millisecondsSinceEpoch]);
+  });
 }
 
 /// 测试用失败对象（避免依赖 classify 的构造细节）。

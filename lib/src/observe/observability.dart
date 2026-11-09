@@ -181,19 +181,27 @@ class RequestLog {
     final json = summary.toJson();
     _entries.add(json);
     while (_entries.length > capacity) {
-      _entries.removeAt(0);
+      final evicted = _entries.removeAt(0);
+      // 随条目淘汰同步清掉尝试明细，避免进程级内存单调增长（G5）。
+      final evictedId = evicted['requestId']?.toString();
+      if (evictedId != null) _attempts.remove(evictedId);
     }
     _append(json);
   }
 
   void noteAttempt(String requestId, Map<String, Object?> attempt) {
-    if (_entries.isEmpty) return;
+    // 尝试事件先于 summary 到达：不能因为“还没有任何记录”就丢弃，
+    // 否则进程启动后的第一条请求永远没有尝试明细。
     _attempts.putIfAbsent(requestId, () => <String, Object?>{}).putIfAbsent(
           'attempts',
           () => <Object?>[],
         );
     final list = _attempts[requestId]!['attempts'];
     if (list is List) list.add(attempt);
+    // 兜底上限：极少数请求可能永远不产生 summary（进程级异常）。
+    while (_attempts.length > capacity) {
+      _attempts.remove(_attempts.keys.first);
+    }
   }
 
   Map<String, Object?>? byId(String requestId) {

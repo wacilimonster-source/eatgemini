@@ -30,6 +30,15 @@ void main() {
     expect(f.dimension, QuotaDimension.rpm);
   });
 
+  test('Google 单元素数组错误保留日配额证据', () {
+    final failure = classify(429, '''
+[{"error":{"code":429,"message":"Quota exceeded","details":[
+{"violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}}]
+''');
+    expect(failure.kind, FailureKind.dailyExhausted);
+    expect(failure.dimension, QuotaDimension.rpd);
+  });
+
   test('429 输入 token 每分钟 → tpmLimited', () {
     final f = classify(429, '''
 {"error":{"message":"Quota exceeded","details":[{"violations":[

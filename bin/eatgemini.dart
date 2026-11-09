@@ -38,6 +38,7 @@ Future<void> main(List<String> args) async {
   await runZonedGuarded(
     () async {
       final app = AppController(version: _version, buildCommit: _commit);
+      _printSink = app.logPrint;
       _wireSignals(app);
       final code = await app.start(options);
       exit(code);

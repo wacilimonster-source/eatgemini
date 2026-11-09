@@ -60,7 +60,7 @@ pockettavern ─┘        │  配额引擎     2. gemini-2.5-flash-lite   ← 
 
 ## 三步上手
 
-1. **下载** [eatgemini-v0.2.0.exe](https://github.com/wacilimonster-source/eatgemini/releases/latest)，双击运行
+1. **下载** [eatgemini-v0.2.3.exe](https://github.com/wacilimonster-source/eatgemini/releases/latest)，双击运行
 2. **按引导粘贴 AI Studio Key**（先验证有效再保存，DPAPI 本机加密）
 3. **客户端接入**——接入页给出 SillyTavern 的准确填法，手机 pockettavern 用一行连接码
 
@@ -79,12 +79,12 @@ pockettavern ─┘        │  配额引擎     2. gemini-2.5-flash-lite   ← 
 
 ```powershell
 # 需要 Dart SDK 3.x
-powershell -ExecutionPolicy Bypass -File tool/build.ps1 -Version 0.2.0
+powershell -ExecutionPolicy Bypass -File tool/build.ps1 -Version 0.2.3
 # → build/eatgemini.exe（构建脚本自带测试与发布校验）
 ```
 
 开发运行：`dart run bin/eatgemini.dart --data-dir <目录>`；
-测试：`dart test`（101 用例）；端到端冒烟：`dart run tool/e2e_smoke.dart`；
+测试：`dart test`（147 用例）；端到端冒烟：`dart run tool/e2e_smoke.dart`；
 界面手动调试：`dart run tool/ui_harness.dart`。
 
 ## 路线图

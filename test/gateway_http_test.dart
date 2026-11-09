@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -16,9 +17,11 @@ void main() {
   late RouterConfig config;
   late GatewayServer server;
   late HttpClient client;
+  late List<RequestSummary> summaries;
   bool configured = true;
 
   setUp(() async {
+    summaries = [];
     fake = await FakeUpstream.start();
     config = defaultConfig().copyWith(
       upstream: UpstreamConfig(baseUrl: fake.baseUrl),
@@ -36,12 +39,16 @@ void main() {
       config: () => config,
       engine: () => engine,
       quota: quota,
-      tokens: StaticTokenDirectory(const {'pockettavern': 'tok_pt_test'}),
+      tokens: StaticTokenDirectory(const {
+        'pockettavern': 'tok_pt_test',
+        'sillytavern': 'tok_st_test',
+      }),
       appStatus: () => configured
           ? const AppStatus('ready')
           : const AppStatus('needs_key', '还没有配置 Google API Key'),
       upstreamConfigured: () => configured,
       appVersion: 'test',
+      onSummary: summaries.add,
     );
     await server.start(config.listen);
     client = HttpClient();
@@ -122,6 +129,146 @@ void main() {
     expect(resp.headers.value('x-request-id'), isNotNull);
     expect(body, contains('你好'));
     expect(body, contains('data: [DONE]'));
+  });
+
+  test('chat：提交后断流 → summary 记录 streamErrorCode', () async {
+    // 上游先给一个合法首帧（网关据此提交 200），随后直接断开、不发完成帧。
+    fake.chatHandler = (req, body) async {
+      req.response.statusCode = 200;
+      req.response.headers
+          .set('content-type', 'text/event-stream; charset=utf-8');
+      req.response.write('data: ${jsonEncode({
+            'model': 'gemini-3.8-flash',
+            'choices': [
+              {
+                'index': 0,
+                'delta': {'content': '半截'},
+                'finish_reason': null,
+              }
+            ],
+          })}\n\n');
+      await req.response.flush();
+      await req.response.close();
+    };
+    final (resp, body) = await post(
+      '/v1/chat/completions',
+      {
+        'model': 'router:chat',
+        'stream': true,
+        'messages': [
+          {'role': 'user', 'content': 'hi'}
+        ],
+      },
+      token: 'tok_pt_test',
+    );
+    expect(resp.statusCode, 200);
+    expect(body, contains('半截'));
+    expect(body, contains('incomplete_stream'));
+    expect(summaries, isNotEmpty);
+    final summary = summaries.last;
+    // 提交语义不变：网关成功提交并转发（含错误帧），outcome 仍为 succeeded；
+    // 断流细节由 streamErrorCode 单独承载。
+    expect(summary.outcome, 'succeeded');
+    expect(summary.streamErrorCode, 'incomplete_stream');
+    expect(summary.toJson()['streamErrorCode'], 'incomplete_stream');
+  });
+
+  test('流式请求占住准入名额直到中继结束', () async {
+    final cfg = config.toJson();
+    final policy = cfg['policy'] as Map;
+    policy['maxInFlight'] = 1;
+    policy['maxInFlightPerClient'] = 1;
+    policy['maxQueueLength'] = 4;
+    policy['maxQueueLengthPerClient'] = 0;
+    config = decodeConfig(cfg);
+
+    final release = Completer<void>();
+    fake.chatHandler = (req, body) async {
+      // 上游不关闭响应时，Windows 上默认缓冲会让 flush() 不真正推送。
+      req.response.bufferOutput = false;
+      req.response.headers
+          .set('content-type', 'text/event-stream; charset=utf-8');
+      req.response.write('data: ${jsonEncode({
+            'choices': [
+              {
+                'delta': {'content': '首帧'},
+                'finish_reason': null,
+              }
+            ],
+          })}\n\n');
+      await req.response.flush();
+      await release.future;
+      req.response.write('data: [DONE]\n\n');
+      await req.response.close();
+    };
+
+    final request = await client.postUrl(
+        Uri.parse('http://127.0.0.1:${server.boundPort}/v1/chat/completions'));
+    request.headers.contentType = ContentType.json;
+    request.headers.set('authorization', 'Bearer tok_pt_test');
+    request.add(utf8.encode(jsonEncode({
+      'model': 'router:chat',
+      'stream': true,
+      'messages': [
+        {'role': 'user', 'content': 'hi'}
+      ],
+    })));
+    final first = await request.close();
+    expect(first.statusCode, 200);
+
+    final buffer = StringBuffer();
+    final firstChunk = Completer<void>();
+    final firstDone = Completer<void>();
+    first.listen(
+      (chunk) {
+        buffer.write(utf8.decode(chunk, allowMalformed: true));
+        if (!firstChunk.isCompleted &&
+            buffer.toString().contains('首帧')) {
+          firstChunk.complete();
+        }
+      },
+      onDone: () {
+        if (!firstDone.isCompleted) firstDone.complete();
+      },
+      onError: (_) {
+        if (!firstDone.isCompleted) firstDone.complete();
+      },
+    );
+    await firstChunk.future.timeout(const Duration(seconds: 5));
+
+    // 首帧已提交、SSE 尚未结束：名额仍被占用，同客户端排队上限为 0
+    // → 第二个请求必须被拒绝（修复前 route() 返回即释放，会误放行）。
+    final (resp2, body2) = await post(
+      '/v1/chat/completions',
+      {
+        'model': 'router:chat',
+        'stream': true,
+        'messages': [
+          {'role': 'user', 'content': 'hi'}
+        ],
+      },
+      token: 'tok_pt_test',
+    );
+    expect(resp2.statusCode, 429);
+    expect(jsonDecode(body2)['error']['code'], 'local_capacity_exhausted');
+
+    release.complete();
+    await firstDone.future.timeout(const Duration(seconds: 5));
+    // 服务端 finally 释放名额与客户端收到结束之间有一个事件循环的间隔。
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    final (resp3, _) = await post(
+      '/v1/chat/completions',
+      {
+        'model': 'router:chat',
+        'stream': true,
+        'messages': [
+          {'role': 'user', 'content': 'hi'}
+        ],
+      },
+      token: 'tok_pt_test',
+    );
+    expect(resp3.statusCode, 200);
   });
 
   test('chat：重复斜杠路径（/v1//chat/completions）按归一路由处理', () async {

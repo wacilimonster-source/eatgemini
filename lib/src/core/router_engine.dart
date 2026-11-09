@@ -21,14 +21,32 @@ import '../http/sse.dart';
 class AbortToken {
   bool _aborted = false;
   final Completer<void> _completer = Completer<void>();
+  final Set<void Function()> _listeners = {};
 
   bool get isAborted => _aborted;
 
   Future<void> get whenAborted => _completer.future;
 
+  /// 注册取消回调；已取消时立即执行。配合 [removeListener] 避免每次
+  /// 等待上游帧都往 whenAborted 上挂一个永久回调。
+  void addListener(void Function() listener) {
+    if (_aborted) {
+      listener();
+      return;
+    }
+    _listeners.add(listener);
+  }
+
+  void removeListener(void Function() listener) => _listeners.remove(listener);
+
   void abort() {
     if (_aborted) return;
     _aborted = true;
+    final listeners = List<void Function()>.of(_listeners);
+    _listeners.clear();
+    for (final listener in listeners) {
+      listener();
+    }
     _completer.complete();
   }
 }
@@ -83,6 +101,16 @@ class RouteTrace {
   String? clientId;
   bool fellBack = false;
   int upstreamAttempts = 0;
+  int? effectiveMaxTokens;
+  String? finishReason;
+  String? upstreamEnd;
+  int upstreamFrameCount = 0;
+  int contentChars = 0;
+  int thinkingChars = 0;
+  bool thoughtSignatureSeen = false;
+  List<String> lastDeltaFields = [];
+  int stopCount = 0;
+  String? reasoningEffort;
   final List<AttemptEvent> attempts = [];
   final List<String> transforms = [];
   final List<String> skipped = [];
@@ -94,6 +122,19 @@ class RouteTrace {
         'servedModel': servedModel,
         'fellBack': fellBack,
         'upstreamAttempts': upstreamAttempts,
+        if (effectiveMaxTokens != null)
+          'effectiveMaxTokens': effectiveMaxTokens,
+        if (finishReason != null) 'finishReason': finishReason,
+        if (upstreamEnd != null) 'upstreamEnd': upstreamEnd,
+        'stopCount': stopCount,
+        if (reasoningEffort != null) 'reasoningEffort': reasoningEffort,
+        if (upstreamFrameCount > 0) ...{
+          'upstreamFrameCount': upstreamFrameCount,
+          'contentChars': contentChars,
+          'thinkingChars': thinkingChars,
+          'thoughtSignatureSeen': thoughtSignatureSeen,
+          'lastDeltaFields': lastDeltaFields,
+        },
         'transforms': transforms,
         'skipped': skipped,
         'attempts': [for (final a in attempts) a.toJson()],
@@ -322,14 +363,27 @@ class RouterEngine {
         phase: 'sending',
       ));
 
-      final outcome = await _attempt(
-        input: input,
-        modelId: chosen.modelId,
-        body: body,
-        reservation: reservation,
-        routeDeadline: routeDeadline,
-        requestDeadline: requestDeadline,
-      );
+      _AttemptOutcome outcome;
+      try {
+        outcome = await _attempt(
+          trace: trace,
+          input: input,
+          modelId: chosen.modelId,
+          body: body,
+          reservation: reservation,
+          routeDeadline: routeDeadline,
+          requestDeadline: requestDeadline,
+        );
+      } catch (e) {
+        // 兜底：任何未预料的异常都不能把请求挂在半路，更不能让
+        // request.finished 永不发出（S2）。
+        quota.markUncertain(reservation);
+        outcome = _AttemptFailure(UpstreamFailure(
+          kind: FailureKind.upstreamProtocolError,
+          status: 502,
+          message: _shorten(e.toString()),
+        ));
+      }
 
       final latency = clock().difference(attemptStart).inMilliseconds;
 
@@ -363,6 +417,11 @@ class RouterEngine {
           );
 
         case _AttemptFailure():
+          if (outcome.aborted || input.abort.isAborted) {
+            // 客户端已取消：不再换模型，按 499 结束（S1）。
+            quota.markUncertain(reservation);
+            return _cancelled(trace);
+          }
           lastFailure = outcome.failure;
           trace.attempts.add(AttemptEvent(
             requestId: trace.requestId,
@@ -540,8 +599,13 @@ class RouterEngine {
       }
     }
 
-    if (req.stop != null && !repairs.contains('stop')) {
+    if (req.stop != null &&
+        !repairs.contains('stop') &&
+        !spec.stripParams.contains('stop')) {
       body['stop'] = req.stop;
+    } else if (req.stop != null &&
+        (repairs.contains('stop') || spec.stripParams.contains('stop'))) {
+      transforms.add('strip:stop');
     }
 
     if (req.reasoningEffort != null && !repairs.contains('reasoning_effort')) {
@@ -559,12 +623,34 @@ class RouterEngine {
       transforms.add('drop:seed');
     }
 
+    if (req.includeReasoning && req.reasoningEffort != 'none') {
+      // Google rejects reasoning_effort together with thinking_config.
+      final effort = body.remove('reasoning_effort');
+      body['extra_body'] = {
+        'google': {
+          'thinking_config': {
+            'include_thoughts': true,
+            if (effort != null && modelId.startsWith('gemini-3'))
+              'thinking_level': effort,
+            if (effort != null && modelId.startsWith('gemini-2.5'))
+              'thinking_budget': switch (effort) {
+                'minimal' => 128,
+                'low' => 1024,
+                'medium' => 8192,
+                _ => 24576,
+              },
+          },
+        },
+      };
+    }
+
     return body;
   }
 
   // ---------------------------------------------------------------- 单次尝试
 
   Future<_AttemptOutcome> _attempt({
+    required RouteTrace trace,
     required RouteInput input,
     required String modelId,
     required Map<String, Object?> body,
@@ -573,6 +659,9 @@ class RouterEngine {
     required DateTime requestDeadline,
   }) async {
     final cfg = config;
+    trace.effectiveMaxTokens = body['max_tokens'] as int?;
+    trace.stopCount = input.request.stop?.length ?? 0;
+    trace.reasoningEffort = input.request.reasoningEffort;
     final uri = Uri.parse('${cfg.upstream.baseUrl}chat/completions');
     final payload = Uint8List.fromList(utf8.encode(jsonEncode(body)));
     final headers = <String, String>{
@@ -630,8 +719,36 @@ class RouterEngine {
     }
 
     if (response.statusCode != 200) {
-      final text = await _readLimited(response.body, 65536);
-      await response.cancel();
+      // 响应头已到，但响应体也可能卡住或中途断开：限制读取时间并吞掉
+      // 读取异常，仍按状态码分类（S2）。否则异常会冒到网关层变成 500，
+      // 且 request.finished 不会发出。
+      String text;
+      try {
+        text = await _abortable(
+              _readLimited(
+                response.body,
+                65536,
+                idleTimeout: _bodyIdleTimeout(cfg, requestDeadline),
+              ),
+              input.abort,
+            ) ??
+            '';
+      } catch (_) {
+        text = '';
+      } finally {
+        await response.cancel();
+      }
+      if (input.abort.isAborted) {
+        quota.markUncertain(reservation);
+        return _AttemptFailure(
+          const UpstreamFailure(
+            kind: FailureKind.transient,
+            status: 499,
+            message: '客户端已取消请求',
+          ),
+          aborted: true,
+        );
+      }
       final failure = classifyUpstreamError(
         status: response.statusCode,
         headers: response.headers,
@@ -642,10 +759,26 @@ class RouterEngine {
 
     if (!input.request.stream) {
       try {
-        final bytes = await _readLimitedBytes(
-          response.body,
-          cfg.policy.maxBufferedResponseBytes,
+        final bytes = await _abortable(
+          _readLimitedBytes(
+            response.body,
+            cfg.policy.maxBufferedResponseBytes,
+            idleTimeout: _bodyIdleTimeout(cfg, requestDeadline),
+          ),
+          input.abort,
         );
+        if (bytes == null) {
+          await response.cancel();
+          quota.markUncertain(reservation);
+          return _AttemptFailure(
+            const UpstreamFailure(
+              kind: FailureKind.transient,
+              status: 499,
+              message: '客户端已取消请求',
+            ),
+            aborted: true,
+          );
+        }
         final decoded = jsonDecode(utf8.decode(bytes));
         if (decoded is! Map) {
           quota.markUncertain(reservation);
@@ -669,6 +802,17 @@ class RouterEngine {
             kind: FailureKind.upstreamProtocolError,
             status: 200,
             message: '上游响应缺少 choices',
+          ));
+        }
+        final finish = _finishReason(decoded.cast<String, Object?>());
+        trace.finishReason = finish;
+        if (finish?.startsWith('content_filter') == true) {
+          trace.upstreamEnd = 'content_filter';
+          quota.markSuccess(reservation);
+          return _AttemptFailure(UpstreamFailure(
+            kind: FailureKind.blocked,
+            status: 200,
+            message: finish!,
           ));
         }
         quota.markSuccess(reservation);
@@ -706,13 +850,28 @@ class RouterEngine {
     var sawAny = false;
     try {
       while (true) {
-        final hasNext = await _moveNext(
+        final hasNext = await _moveNextOrAbort(
           iterator,
           _minDuration(
             Duration(milliseconds: cfg.upstream.firstEventTimeoutMs),
             _remaining(requestDeadline),
           ),
+          input.abort,
         );
+        if (hasNext == null) {
+          // 等待首帧期间客户端断开：立刻取消上游连接（S1）。
+          await response.cancel();
+          await iterator.cancel();
+          quota.markUncertain(reservation);
+          return _AttemptFailure(
+            const UpstreamFailure(
+              kind: FailureKind.transient,
+              status: 499,
+              message: '客户端已取消请求',
+            ),
+            aborted: true,
+          );
+        }
         if (!hasNext) break;
         final event = iterator.current;
         if (event.isDone) break;
@@ -726,9 +885,25 @@ class RouterEngine {
         if (decoded is! Map) continue;
         final map = decoded.cast<String, Object?>();
         if (map['error'] != null) {
+          // 首帧就是错误帧：旧连接与未读完的缓冲必须一起取消（G11）。
+          await response.cancel();
+          await iterator.cancel();
           return _AttemptFailure(
             _classifyStreamError(map['error'], response.headers),
           );
+        }
+        final finish = _finishReason(map);
+        if (finish?.startsWith('content_filter') == true) {
+          trace.finishReason = finish;
+          trace.upstreamEnd = 'content_filter';
+          await response.cancel();
+          await iterator.cancel();
+          quota.markSuccess(reservation);
+          return _AttemptFailure(UpstreamFailure(
+            kind: FailureKind.blocked,
+            status: 200,
+            message: finish!,
+          ));
         }
         final choices = map['choices'];
         if (choices is List && choices.isNotEmpty) {
@@ -738,8 +913,8 @@ class RouterEngine {
         // usage-only 或 role-only 帧：继续等。
       }
     } on TimeoutException {
-      await iterator.cancel();
       await response.cancel();
+      await iterator.cancel();
       quota.markUncertain(reservation);
       return _AttemptFailure(const UpstreamFailure(
         kind: FailureKind.transient,
@@ -747,8 +922,8 @@ class RouterEngine {
         message: '等待上游首个响应事件超时',
       ));
     } catch (e) {
-      await iterator.cancel();
       await response.cancel();
+      await iterator.cancel();
       quota.markUncertain(reservation);
       return _AttemptFailure(UpstreamFailure(
         kind: FailureKind.upstreamProtocolError,
@@ -758,8 +933,8 @@ class RouterEngine {
     }
 
     if (first == null) {
-      await iterator.cancel();
       await response.cancel();
+      await iterator.cancel();
       quota.markUncertain(reservation);
       return _AttemptFailure(UpstreamFailure(
         kind: FailureKind.transient,
@@ -772,11 +947,14 @@ class RouterEngine {
     final served = first['model']?.toString() ?? modelId;
     return _AttemptSuccess.stream(
       _continueStreamText(
+        trace: trace,
         iterator: iterator,
         first: first,
         includeUsage: input.request.includeUsage,
         idleTimeout: Duration(milliseconds: cfg.upstream.streamIdleTimeoutMs),
         requestDeadline: requestDeadline,
+        abort: input.abort,
+        cancelUpstream: response.cancel,
       ).map(utf8.encode),
       modelId: served,
       headers: const {
@@ -788,28 +966,46 @@ class RouterEngine {
   }
 
   Stream<String> _continueStreamText({
+    required RouteTrace trace,
     required StreamIterator<SseEvent> iterator,
     required Map<String, Object?> first,
     required bool includeUsage,
     required Duration idleTimeout,
     required DateTime requestDeadline,
+    required AbortToken abort,
+    required Future<void> Function() cancelUpstream,
   }) async* {
+    _normalizeThoughts(first, trace);
     var finishSeen = _hasFinish(first);
+    // 正常读到 EOF/[DONE] 时不必强制断开连接；取消/超时/协议错误才 abort。
+    var upstreamFinished = false;
+    trace.finishReason = _finishReason(first);
     yield encodeDownstreamData(first);
     try {
       while (true) {
+        if (abort.isAborted) {
+          // 客户端断开/停止生成：不再继续拉取上游 SSE（S1）。
+          trace.upstreamEnd = 'client_cancelled';
+          return;
+        }
         final budget = _minDuration(idleTimeout, _remaining(requestDeadline));
         if (budget <= Duration.zero) {
+          trace.upstreamEnd = 'gateway_deadline';
           yield encodeDownstreamData(sseErrorPayload(
             message: '网关总截止时间已到',
             code: 'gateway_deadline',
           ));
           return;
         }
-        bool hasNext;
+        bool? hasNext;
         try {
-          hasNext = await _moveNext(iterator, budget);
+          hasNext = await _moveNextOrAbort(iterator, budget, abort);
+          if (hasNext == null) {
+            trace.upstreamEnd = 'client_cancelled';
+            return;
+          }
         } on TimeoutException {
+          trace.upstreamEnd = 'upstream_idle_timeout';
           yield encodeDownstreamData(sseErrorPayload(
             message: '上游流空闲超时',
             code: 'upstream_idle_timeout',
@@ -817,6 +1013,8 @@ class RouterEngine {
           return;
         }
         if (!hasNext) {
+          trace.upstreamEnd = 'eof';
+          upstreamFinished = true;
           if (finishSeen) {
             yield kDownstreamDone;
           } else {
@@ -829,6 +1027,8 @@ class RouterEngine {
         }
         final event = iterator.current;
         if (event.isDone) {
+          trace.upstreamEnd = 'done';
+          upstreamFinished = true;
           if (!finishSeen) {
             yield encodeDownstreamData(sseErrorPayload(
               message: '上游只发送了结束标记，没有合法完成帧',
@@ -851,6 +1051,17 @@ class RouterEngine {
         }
         if (decoded is! Map) continue;
         final map = decoded.cast<String, Object?>();
+        _normalizeThoughts(map, trace);
+        final finish = _finishReason(map);
+        if (finish?.startsWith('content_filter') == true) {
+          trace.finishReason = finish;
+          trace.upstreamEnd = 'content_filter';
+          yield encodeDownstreamData(sseErrorPayload(
+            message: 'Gemini 内容过滤终止了生成：$finish',
+            code: 'blocked_by_upstream',
+          ));
+          return;
+        }
         final error = map['error'];
         if (error != null) {
           yield encodeDownstreamData(sseErrorPayload(
@@ -863,32 +1074,97 @@ class RouterEngine {
         final usageOnly = choices is List && choices.isEmpty;
         if (usageOnly && !includeUsage) continue;
         if (_hasFinish(map)) finishSeen = true;
+        trace.finishReason = _finishReason(map) ?? trace.finishReason;
         yield encodeDownstreamData(map);
       }
+    } catch (e) {
+      trace.upstreamEnd = e.runtimeType.toString();
+      rethrow;
     } finally {
+      // 客户端取消/超时/协议错误：先断开连接再取消迭代器，避免上游
+      // 继续生成（S1）；正常读到结束标记时只释放迭代器，保留连接池。
+      if (abort.isAborted || !upstreamFinished) {
+        await cancelUpstream();
+      }
       await iterator.cancel();
     }
   }
 
-  Future<bool> _moveNext(StreamIterator<SseEvent> it, Duration timeout) {
+  /// 等待下一个 SSE 事件，同时监听客户端取消。
+  ///
+  /// 返回 null 表示已取消（上游可能一直静默，不能只靠 isAborted 轮询）。
+  Future<bool?> _moveNextOrAbort(
+    StreamIterator<SseEvent> it,
+    Duration timeout,
+    AbortToken abort,
+  ) {
     if (timeout <= Duration.zero) {
       throw TimeoutException('no budget');
     }
-    return it.moveNext().timeout(timeout);
+    return _abortable(it.moveNext(), abort).timeout(timeout);
   }
 
-  bool _hasFinish(Map<String, Object?> map) {
+  /// 让一个 Future 与取消信号赛跑；取消时返回 null。
+  Future<T?> _abortable<T>(Future<T> future, AbortToken abort) {
+    if (abort.isAborted) return Future<T?>.value(null);
+    final completer = Completer<T?>();
+    void onAbort() {
+      if (!completer.isCompleted) completer.complete(null);
+    }
+
+    abort.addListener(onAbort);
+    future.then<void>(
+      (value) {
+        abort.removeListener(onAbort);
+        if (!completer.isCompleted) completer.complete(value);
+      },
+      onError: (Object error, StackTrace stack) {
+        abort.removeListener(onAbort);
+        if (!completer.isCompleted) completer.completeError(error, stack);
+      },
+    );
+    return completer.future;
+  }
+
+  bool _hasFinish(Map<String, Object?> map) => _finishReason(map) != null;
+
+  void _normalizeThoughts(Map<String, Object?> map, RouteTrace trace) {
+    trace.upstreamFrameCount++;
     final choices = map['choices'];
-    if (choices is! List) return false;
+    if (choices is! List) return;
+    for (final choice in choices) {
+      final delta = choice is Map ? choice['delta'] : null;
+      if (delta is! Map) continue;
+      final extra = delta['extra_content'];
+      final google = extra is Map ? extra['google'] : null;
+      trace.lastDeltaFields = delta.keys.map((key) => key.toString()).toList();
+      if (google is Map && google['thought_signature'] != null) {
+        trace.thoughtSignatureSeen = true;
+      }
+      if (google is Map &&
+          google['thought'] == true &&
+          delta['content'] is String) {
+        delta['reasoning_content'] = delta.remove('content');
+      }
+      final content = delta['content'];
+      final thinking = delta['reasoning_content'] ?? delta['reasoning'];
+      if (content is String) trace.contentChars += content.length;
+      if (thinking is String) trace.thinkingChars += thinking.length;
+    }
+  }
+
+  String? _finishReason(Map<String, Object?> map) {
+    final choices = map['choices'];
+    if (choices is! List) return null;
     for (final c in choices) {
       if (c is Map) {
         final fr = c['finish_reason'];
         if (fr != null && fr.toString() != 'null' && fr.toString().isNotEmpty) {
-          return true;
+          return fr.toString();
         }
       }
     }
-    return false;
+    return null;
   }
 
   UpstreamFailure _classifyStreamError(
@@ -1130,9 +1406,22 @@ class RouterEngine {
 
   Duration _minDuration(Duration a, Duration b) => a < b ? a : b;
 
-  Future<String> _readLimited(Stream<List<int>> stream, int maxBytes) async {
+  /// 响应体读取的空闲预算：不超过流空闲超时，也不超过请求总截止。
+  Duration _bodyIdleTimeout(RouterConfig cfg, DateTime deadline) =>
+      _minDuration(
+        Duration(milliseconds: cfg.upstream.streamIdleTimeoutMs),
+        _remaining(deadline),
+      );
+
+  Future<String> _readLimited(
+    Stream<List<int>> stream,
+    int maxBytes, {
+    Duration? idleTimeout,
+  }) async {
+    final source =
+        idleTimeout == null ? stream : stream.timeout(idleTimeout);
     final builder = BytesBuilder(copy: false);
-    await for (final chunk in stream) {
+    await for (final chunk in source) {
       builder.add(chunk);
       if (builder.length >= maxBytes) break;
     }
@@ -1141,10 +1430,13 @@ class RouterEngine {
 
   Future<List<int>> _readLimitedBytes(
     Stream<List<int>> stream,
-    int maxBytes,
-  ) async {
+    int maxBytes, {
+    Duration? idleTimeout,
+  }) async {
+    final source =
+        idleTimeout == null ? stream : stream.timeout(idleTimeout);
     final builder = BytesBuilder(copy: false);
-    await for (final chunk in stream) {
+    await for (final chunk in source) {
       if (maxBytes > 0 && builder.length + chunk.length > maxBytes) {
         throw SseProtocolException('上游响应超过缓冲上限');
       }
@@ -1219,7 +1511,10 @@ class _AttemptSuccess implements _AttemptOutcome {
 }
 
 class _AttemptFailure implements _AttemptOutcome {
-  _AttemptFailure(this.failure);
+  _AttemptFailure(this.failure, {this.aborted = false});
 
   final UpstreamFailure failure;
+
+  /// 客户端取消导致的提前结束；不再换模型，直接返回 499。
+  final bool aborted;
 }

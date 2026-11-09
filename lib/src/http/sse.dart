@@ -51,6 +51,11 @@ Stream<SseEvent> decodeSse(
     var value = line.substring(5);
     if (value.startsWith(' ')) value = value.substring(1);
     if (value.trim() == '[DONE]') {
+      if (dataLines.isNotEmpty) {
+        yield SseEvent(data: dataLines.join('\n'));
+        dataLines.clear();
+        size = 0;
+      }
       yield const SseEvent(data: '', isDone: true);
       continue;
     }

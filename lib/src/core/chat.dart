@@ -43,6 +43,7 @@ class ChatRequest {
     required this.messages,
     required this.stream,
     required this.includeUsage,
+    this.includeReasoning = false,
     this.temperature,
     this.topP,
     this.maxTokens,
@@ -58,6 +59,7 @@ class ChatRequest {
   final List<ChatMessage> messages;
   final bool stream;
   final bool includeUsage;
+  final bool includeReasoning;
   final double? temperature;
   final double? topP;
   final int? maxTokens;
@@ -120,6 +122,7 @@ ChatRequest parseChatRequest(Map<String, Object?> body) {
     'tool_choice',
     'parallel_tool_calls',
     'reasoning_effort',
+    'include_reasoning',
   };
 
   for (final key in body.keys) {
@@ -207,10 +210,10 @@ ChatRequest parseChatRequest(Map<String, Object?> body) {
 
   final stop = _stopList(body['stop']);
 
-  final reasoningEffort =
-      (body['reasoning_effort'] is String && (body['reasoning_effort'] as String).isNotEmpty)
-          ? (body['reasoning_effort'] as String)
-          : null;
+  final reasoningEffort = (body['reasoning_effort'] is String &&
+          (body['reasoning_effort'] as String).isNotEmpty)
+      ? (body['reasoning_effort'] as String)
+      : null;
   if (reasoningEffort != null &&
       !const {'minimal', 'low', 'medium', 'high', 'none'}
           .contains(reasoningEffort)) {
@@ -229,6 +232,7 @@ ChatRequest parseChatRequest(Map<String, Object?> body) {
     messages: messages,
     stream: stream,
     includeUsage: includeUsage,
+    includeReasoning: body['include_reasoning'] == true,
     temperature: _asDouble(body['temperature']),
     topP: _asDouble(body['top_p']),
     maxTokens: maxTokens,

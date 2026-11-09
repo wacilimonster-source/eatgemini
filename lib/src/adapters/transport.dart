@@ -72,62 +72,50 @@ abstract interface class Transport {
   Future<void> close();
 }
 
-/// 解析代理配置为 Dart `findProxy` 函数。
-///
-/// 规则（内核文档 §13.1 + 桌面实测补充）：
-/// - none → DIRECT；
-/// - manual → PROXY host:port；
-/// - environment / system → 优先环境变量（HTTPS_PROXY 等）；
-///   环境变量不存在时，回落使用配置里填写的 host/port——界面允许在
-///   环境变量模式下填写主机/端口，静默忽略它们是配置陷阱（实测踩过）。
-String Function(Uri) findProxyResolver(
-  ProxyConfig proxy, {
-  String? Function(String key)? envLookup,
-}) {
-  final lookup = envLookup ??
-      (key) => Platform.environment[key];
-  String? envSpec() {
-    for (final key in const [
-      'https_proxy',
-      'HTTPS_PROXY',
-      'http_proxy',
-      'HTTP_PROXY',
-      'all_proxy',
-      'ALL_PROXY',
-    ]) {
-      final v = lookup(key);
-      if (v != null && v.trim().isNotEmpty) {
-        return v.trim();
-      }
-    }
-    return null;
-  }
+/// 解析后的代理端点。`type` 为 Dart findProxy 支持的协议关键字。
+class ProxyEndpoint {
+  const ProxyEndpoint({
+    required this.type,
+    required this.host,
+    required this.port,
+    this.username,
+    this.password,
+  });
 
-  switch (proxy.mode) {
-    case ProxyMode.none:
-      return (_) => 'DIRECT';
-    case ProxyMode.manual:
-      final spec = proxy.dartProxySpec;
-      return (_) => spec == null ? 'DIRECT' : 'PROXY $spec';
-    case ProxyMode.environment:
-    case ProxyMode.system:
-      // 自己解析并规范化环境变量：clash 等工具导出的值常见
-      // `http://host:port` 或 `http=..;https=..` 形态，SDK 的
-      // findProxyFromEnvironment 只认 `host:port`，直接交给它可能失效。
-      final env = envSpec();
-      if (env != null) {
-        final normalized = normalizeProxyValue(env);
-        if (normalized != null) {
-          return (_) => 'PROXY $normalized';
-        }
-      }
-      final spec = proxy.hostPortSpec;
-      return (_) => spec == null ? 'DIRECT' : 'PROXY $spec';
-  }
+  final String type; // PROXY / SOCKS5 / SOCKS4
+  final String host;
+  final int port;
+  final String? username;
+  final String? password;
+
+  String get rule => '$type $host:$port';
 }
 
-/// 把环境变量里的代理值规范化成 `host:port`；解析不了返回 null。
-String? normalizeProxyValue(String raw) {
+const _proxyEnvKeys = [
+  'https_proxy',
+  'HTTPS_PROXY',
+  'http_proxy',
+  'HTTP_PROXY',
+  'all_proxy',
+  'ALL_PROXY',
+];
+
+(String, String)? _firstEnvProxy(String? Function(String key) lookup) {
+  for (final key in _proxyEnvKeys) {
+    final value = lookup(key);
+    if (value != null && value.trim().isNotEmpty) {
+      return (key, value.trim());
+    }
+  }
+  return null;
+}
+
+/// 把代理值解析成带协议的端点；解析不了返回 null。
+///
+/// 保留 scheme 很关键：`socks5://host:port` 必须映射成 `SOCKS5 host:port`，
+/// 统一拼成 `PROXY` 会用 HTTP 协议去连 SOCKS 端口（G7）。凭据单独返回，
+/// 由 [applyProxyToClient] 通过 authenticateProxy 注入。
+ProxyEndpoint? parseProxyValue(String raw) {
   var value = raw.trim();
   if (value.isEmpty) return null;
   // `http=host:port;https=host:port`：优先 https 条目
@@ -149,8 +137,110 @@ String? normalizeProxyValue(String raw) {
   if (value.isEmpty || value.toLowerCase() == 'direct') return null;
   final uri = Uri.tryParse(value.contains('://') ? value : 'http://$value');
   if (uri == null || uri.host.isEmpty) return null;
-  final port = uri.hasPort ? uri.port : 80;
-  return '${uri.host}:$port';
+  final scheme = (uri.scheme.isEmpty ? 'http' : uri.scheme).toLowerCase();
+  final type = switch (scheme) {
+    'socks5' || 'socks5h' || 'socks' => 'SOCKS5',
+    'socks4' || 'socks4a' => 'SOCKS4',
+    _ => 'PROXY',
+  };
+  final port = uri.hasPort
+      ? uri.port
+      : switch (scheme) {
+          'socks5' || 'socks5h' || 'socks' || 'socks4' || 'socks4a' => 1080,
+          'https' => 443,
+          _ => 80,
+        };
+  String? username;
+  String? password;
+  if (uri.userInfo.isNotEmpty) {
+    final idx = uri.userInfo.indexOf(':');
+    if (idx >= 0) {
+      username = Uri.decodeComponent(uri.userInfo.substring(0, idx));
+      password = Uri.decodeComponent(uri.userInfo.substring(idx + 1));
+    } else {
+      username = Uri.decodeComponent(uri.userInfo);
+      password = '';
+    }
+  }
+  return ProxyEndpoint(
+    type: type,
+    host: uri.host,
+    port: port,
+    username: username,
+    password: password,
+  );
+}
+
+/// 把环境变量里的代理值规范化成 Dart findProxy 规则（含协议关键字）；
+/// 解析不了返回 null。
+String? normalizeProxyValue(String raw) => parseProxyValue(raw)?.rule;
+
+/// 解析当前生效的代理端点。
+ProxyEndpoint? resolveProxy(
+  ProxyConfig proxy, {
+  String? Function(String key)? envLookup,
+}) {
+  switch (proxy.mode) {
+    case ProxyMode.none:
+      return null;
+    case ProxyMode.manual:
+      if (proxy.host == null || proxy.port == null) return null;
+      return ProxyEndpoint(
+        type: 'PROXY',
+        host: proxy.host!,
+        port: proxy.port!,
+      );
+    case ProxyMode.environment:
+    case ProxyMode.system:
+      // 自己解析并规范化环境变量：clash 等工具导出的值常见
+      // `http://host:port` 或 `http=..;https=..` 形态。
+      final found = _firstEnvProxy(envLookup ?? (key) => Platform.environment[key]);
+      if (found != null) {
+        final parsed = parseProxyValue(found.$2);
+        if (parsed != null) return parsed;
+      }
+      if (proxy.host == null || proxy.port == null) return null;
+      return ProxyEndpoint(
+        type: 'PROXY',
+        host: proxy.host!,
+        port: proxy.port!,
+      );
+  }
+}
+
+/// 解析代理配置为 Dart `findProxy` 函数。
+///
+/// 规则（内核文档 §13.1 + 桌面实测补充）：
+/// - none → DIRECT；
+/// - manual → PROXY host:port；
+/// - environment / system → 优先环境变量（HTTPS_PROXY 等），保留
+///   http/socks 协议与凭据；环境变量不存在时回落配置里的 host/port。
+String Function(Uri) findProxyResolver(
+  ProxyConfig proxy, {
+  String? Function(String key)? envLookup,
+}) {
+  final endpoint = resolveProxy(proxy, envLookup: envLookup);
+  return (_) => endpoint?.rule ?? 'DIRECT';
+}
+
+/// 给 HttpClient 应用代理与认证信息。
+void applyProxyToClient(
+  HttpClient client,
+  ProxyConfig proxy, {
+  String? Function(String key)? envLookup,
+}) {
+  final endpoint = resolveProxy(proxy, envLookup: envLookup);
+  client.findProxy = (_) => endpoint?.rule ?? 'DIRECT';
+  final username = endpoint?.username;
+  if (endpoint == null || username == null) return;
+  client.authenticateProxy = (host, port, scheme, realm) async {
+    client.addCredentials(
+      Uri(scheme: scheme, host: host, port: port),
+      realm ?? '',
+      HttpClientBasicCredentials(username, endpoint.password ?? ''),
+    );
+    return true;
+  };
 }
 
 /// 当前实际生效的代理描述（诊断/日志用；不含凭据）。
@@ -158,30 +248,20 @@ String? effectiveProxySpec(
   ProxyConfig proxy, {
   String? Function(String key)? envLookup,
 }) {
-  final lookup = envLookup ??
-      (key) => Platform.environment[key];
   switch (proxy.mode) {
     case ProxyMode.none:
       return null;
     case ProxyMode.manual:
-      return proxy.dartProxySpec == null ? null : 'PROXY ${proxy.dartProxySpec}';
+      return resolveProxy(proxy)?.rule;
     case ProxyMode.environment:
     case ProxyMode.system:
-      for (final key in const [
-        'https_proxy',
-        'HTTPS_PROXY',
-        'http_proxy',
-        'HTTP_PROXY',
-        'all_proxy',
-        'ALL_PROXY',
-      ]) {
-        final v = lookup(key);
-        if (v != null && v.trim().isNotEmpty) {
-          final normalized = normalizeProxyValue(v);
-          return '环境变量 $key${normalized == null ? '' : ' → PROXY $normalized'}';
-        }
+      final lookup = envLookup ?? (key) => Platform.environment[key];
+      final found = _firstEnvProxy(lookup);
+      if (found != null) {
+        final rule = parseProxyValue(found.$2)?.rule ?? 'DIRECT';
+        return '环境变量 ${found.$1} → $rule';
       }
-      return proxy.hostPortSpec == null ? null : 'PROXY ${proxy.hostPortSpec}';
+      return resolveProxy(proxy, envLookup: envLookup)?.rule;
   }
 }
 
@@ -210,7 +290,7 @@ class DartIoTransport implements Transport {
   }
 
   void _applyProxy() {
-    _client.findProxy = findProxyResolver(config.upstream.proxy);
+    applyProxyToClient(_client, config.upstream.proxy);
   }
 
   @override

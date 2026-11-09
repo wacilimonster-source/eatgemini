@@ -5,7 +5,7 @@
 library;
 
 import 'dart:convert';
-import 'dart:io' show Platform;
+import 'dart:io' show InternetAddress, Platform;
 
 /// 配置无效（启动时直接失败；热加载时保留旧快照）。
 class ConfigException implements Exception {
@@ -60,7 +60,7 @@ class ProxyConfig {
   final String? host;
   final int? port;
 
-  /// Dart 的 `findProxy` 接受 `host:port`，不接受 scheme。
+  /// 手动模式的 `host:port`；`PROXY` 前缀由传输层补充。
   String? get dartProxySpec {
     if (mode != ProxyMode.manual || host == null || port == null) return null;
     return '$host:$port';
@@ -954,9 +954,19 @@ ListenConfig _listen(Object? raw, List<String> errors) {
   }
   final m = raw.cast<String, Object?>();
   final mode = m['mode'] == 'lan' ? ListenMode.lan : ListenMode.loopback;
+  final bindRaw = m['bindAddress']?.toString().trim();
+  final bindAddress = (bindRaw == null || bindRaw.isEmpty) ? null : bindRaw;
+  if (bindAddress != null) {
+    final isIp = InternetAddress.tryParse(bindAddress) != null;
+    final isHost = RegExp(r'^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$')
+        .hasMatch(bindAddress);
+    if (!isIp && !isHost) {
+      errors.add('listen.bindAddress 不是合法的 IP 或主机名');
+    }
+  }
   return ListenConfig(
     mode: mode,
-    bindAddress: m['bindAddress']?.toString(),
+    bindAddress: bindAddress,
     port: _int(m['port'], 'listen.port', errors, fallback: 8787),
   );
 }

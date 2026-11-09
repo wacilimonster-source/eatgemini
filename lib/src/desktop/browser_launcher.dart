@@ -20,7 +20,7 @@ class BrowserLauncher {
   final String preferred;
 
   Future<LaunchResult> open(Uri url) async {
-    final browser = preferred == 'default' ? null : _findBrowser();
+    final browser = preferred == 'default' ? null : _findBrowser(preferred);
     if (browser != null) {
       try {
         if (!userDataDir.existsSync()) userDataDir.createSync(recursive: true);
@@ -66,25 +66,35 @@ class BrowserLauncher {
     }
   }
 
-  String? _findBrowser() {
-    for (final candidate in _candidates()) {
+  String? _findBrowser(String preferred) {
+    for (final candidate in _candidates(preferred)) {
       if (File(candidate).existsSync()) return candidate;
     }
     return null;
   }
 
-  List<String> _candidates() {
+  /// 按 `desktop.browser` 选择优先顺序；找不到时回退到另一个浏览器。
+  List<String> _candidates(String preferred) {
     final programFiles = Platform.environment['ProgramFiles'] ?? r'C:\Program Files';
     final programFilesX86 =
         Platform.environment['ProgramFiles(x86)'] ?? r'C:\Program Files (x86)';
     final localAppData = Platform.environment['LOCALAPPDATA'] ?? '';
-    return [
+    final edge = [
       '$programFilesX86\\Microsoft\\Edge\\Application\\msedge.exe',
       '$programFiles\\Microsoft\\Edge\\Application\\msedge.exe',
       if (localAppData.isNotEmpty)
         '$localAppData\\Microsoft\\Edge\\Application\\msedge.exe',
+    ];
+    final chrome = [
       '$programFiles\\Google\\Chrome\\Application\\chrome.exe',
       '$programFilesX86\\Google\\Chrome\\Application\\chrome.exe',
+      if (localAppData.isNotEmpty)
+        '$localAppData\\Google\\Chrome\\Application\\chrome.exe',
     ];
+    return switch (preferred) {
+      'edge' => [...edge, ...chrome],
+      'chrome' => [...chrome, ...edge],
+      _ => [...edge, ...chrome],
+    };
   }
 }

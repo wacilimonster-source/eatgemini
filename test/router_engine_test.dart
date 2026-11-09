@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -35,7 +36,9 @@ void main() {
   });
 
   RouteInput input(String model,
-      {bool stream = true, Map<String, Object?>? extra}) {
+      {bool stream = true,
+      Map<String, Object?>? extra,
+      AbortToken? abort}) {
     final body = <String, Object?>{
       'model': model,
       'messages': [
@@ -50,6 +53,7 @@ void main() {
       request: parseChatRequest(body),
       requestId: 'req_test',
       startedAt: DateTime.now(),
+      abort: abort,
     );
   }
 
@@ -102,6 +106,94 @@ void main() {
     expect(fake.requests[0]['model'], 'gemini-3.8-flash');
     expect(fake.requests[1]['model'], 'gemini-3.6-flash');
   });
+
+  test('思考摘要转换为 Google 配置并保留强度', () async {
+    final result = await engine.route(input('router:chat', extra: {
+      'include_reasoning': true,
+      'reasoning_effort': 'low',
+    })) as RouteStreamResult;
+    await result.body.drain<void>();
+    final body = fake.requests.single;
+    expect(body.containsKey('reasoning_effort'), isFalse);
+    expect(body['extra_body'], {
+      'google': {
+        'thinking_config': {'include_thoughts': true, 'thinking_level': 'low'},
+      },
+    });
+    expect(result.trace.finishReason, 'stop');
+    expect(result.trace.upstreamEnd, 'done');
+    expect(result.trace.effectiveMaxTokens, 65536);
+  });
+
+  test('Google 思考内容与正文分别转发', () async {
+    fake.chatHandler = (req, body) async {
+      req.response.headers.set('content-type', 'text/event-stream; charset=utf-8');
+      for (final delta in [
+        {'content': '先分析', 'extra_content': {'google': {'thought': true}}},
+        {'content': '再考虑', 'extra_content': {'google': {'thought': true}}},
+        {'content': '答案'},
+      ]) {
+        req.response.write('data: ${jsonEncode({'choices': [
+          {'delta': delta, 'finish_reason': null}
+        ]})}\n\n');
+      }
+      req.response.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n');
+      req.response.write('data: [DONE]\n\n');
+      await req.response.close();
+    };
+    final result = await engine.route(input('router:chat')) as RouteStreamResult;
+    final text = await result.body.transform(utf8.decoder).join();
+    expect(text, contains('"reasoning_content":"先分析"'));
+    expect(text, contains('"reasoning_content":"再考虑"'));
+    expect(text, isNot(contains('"content":"先分析"')));
+    expect(text, contains('"content":"答案"'));
+    expect(result.trace.contentChars, 2);
+    expect(result.trace.thinkingChars, 6);
+  });
+
+  test('思考后的最后正文帧缺结束空行仍完整转发', () async {
+    fake.chatHandler = (req, body) async {
+      req.response.headers.set('content-type', 'text/event-stream; charset=utf-8');
+      req.response.write('data: {"choices":[{"delta":{"content":"思考","extra_content":{"google":{"thought":true}}}}]}\n\n');
+      req.response.write('data: {"choices":[{"delta":{"content":"答案"},"finish_reason":"stop"}]}\n');
+      req.response.write('data: [DONE]\n\n');
+      await req.response.close();
+    };
+    final result = await engine.route(input('router:chat')) as RouteStreamResult;
+    final text = await result.body.transform(utf8.decoder).join();
+    expect(text, contains('"reasoning_content":"思考"'));
+    expect(text, contains('"content":"答案"'));
+    expect(text, contains('data: [DONE]'));
+    expect(text, isNot(contains('incomplete_stream')));
+    expect(result.trace.contentChars, 2);
+    expect(result.trace.finishReason, 'stop');
+  });
+
+  for (final partial in [false, true]) {
+    test('内容过滤明确报错 partial=$partial', () async {
+      fake.chatHandler = (req, body) async {
+        req.response.headers.set('content-type', 'text/event-stream; charset=utf-8');
+        if (partial) {
+          req.response.write('data: {"choices":[{"delta":{"content":"半截"}}]}\n\n');
+        }
+        req.response.write('data: {"choices":[{"delta":{},"finish_reason":"content_filter: PROHIBITED_CONTENT"}]}\n\n');
+        req.response.write('data: [DONE]\n\n');
+        await req.response.close();
+      };
+      final result = await engine.route(input('router:chat'));
+      if (partial) {
+        final text = await (result as RouteStreamResult).body.transform(utf8.decoder).join();
+        expect(text, contains('半截'));
+        expect(text, contains('blocked_by_upstream'));
+        expect(text, isNot(contains('incomplete_stream')));
+      } else {
+        expect((result as RouteErrorResult).code, 'blocked_by_upstream');
+      }
+      expect(fake.requests, hasLength(1));
+      expect(result.trace.finishReason, 'content_filter: PROHIBITED_CONTENT');
+      expect(result.trace.upstreamEnd, 'content_filter');
+    });
+  }
 
   test('提交后断流：发 SSE error，不伪造完成', () async {
     fake.chatHandler = (req, body) async {
@@ -385,4 +477,207 @@ void main() {
       }
     ]);
   });
+
+  test('stripParams 对 stop 生效', () async {
+    final cfg = config.toJson();
+    ((cfg['models'] as Map)['gemini-3.8-flash'] as Map)['stripParams'] = [
+      'stop'
+    ];
+    config = decodeConfig(cfg);
+
+    final result = await engine.route(input('gemini-3.8-flash', extra: {
+      'stop': ['\nUser:'],
+    }));
+    expect(result, isA<RouteStreamResult>());
+    await (result as RouteStreamResult).body.drain<void>();
+    expect(fake.requests.single.containsKey('stop'), isFalse);
+    expect(result.trace.transforms, contains('strip:stop'));
+  });
+
+  test('首个 SSE 事件为 error 时取消上游连接', () async {
+    final cfg = config.toJson();
+    ((cfg['policy'] as Map))['maxUpstreamRequests'] = 1;
+    config = decodeConfig(cfg);
+
+    final body = StreamController<List<int>>();
+    final transport = _RecordingTransport(200, body.stream, onCancel: () {
+      if (!body.isClosed) body.close();
+    });
+    engine = RouterEngine(
+      config: () => config,
+      transport: transport,
+      quota: quota,
+      upstreamApiKey: () => 'test',
+    );
+
+    final pending = engine.route(input('router:chat'));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    body.add(utf8.encode(
+        'data: ${jsonEncode({
+          'error': {'message': 'boom', 'code': 'internal_error'},
+        })}\n\n'));
+
+    final result = await pending.timeout(const Duration(seconds: 2));
+    expect(result, isA<RouteErrorResult>());
+    expect(transport.cancelled, isTrue);
+    await body.close();
+  });
+
+  test('等待首帧期间取消：立即返回 499 并取消上游', () async {
+    final body = StreamController<List<int>>();
+    final transport = _RecordingTransport(200, body.stream, onCancel: () {
+      if (!body.isClosed) body.close();
+    });
+    engine = RouterEngine(
+      config: () => config,
+      transport: transport,
+      quota: quota,
+      upstreamApiKey: () => 'test',
+    );
+
+    final abort = AbortToken();
+    final pending = engine.route(input('router:chat', abort: abort));
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    final sw = Stopwatch()..start();
+    abort.abort();
+    final result = await pending.timeout(const Duration(seconds: 3));
+    expect(result, isA<RouteErrorResult>());
+    expect((result as RouteErrorResult).status, 499);
+    expect(transport.cancelled, isTrue);
+    expect(sw.elapsed, lessThan(const Duration(seconds: 2)));
+    await body.close();
+  });
+
+  test('流式中继取消后停止拉取上游', () async {
+    final body = StreamController<List<int>>();
+    final transport = _RecordingTransport(200, body.stream, onCancel: () {
+      if (!body.isClosed) body.close();
+    });
+    engine = RouterEngine(
+      config: () => config,
+      transport: transport,
+      quota: quota,
+      upstreamApiKey: () => 'test',
+    );
+
+    final abort = AbortToken();
+    final pending = engine.route(input('router:chat', abort: abort));
+    body.add(utf8.encode(
+        'data: ${jsonEncode({
+          'choices': [
+            {
+              'delta': {'content': '首帧'},
+              'finish_reason': null,
+            }
+          ],
+        })}\n\n'));
+    final result =
+        await pending.timeout(const Duration(seconds: 2)) as RouteStreamResult;
+
+    final done = Completer<void>();
+    result.body.listen(
+      (_) {},
+      onDone: () {
+        if (!done.isCompleted) done.complete();
+      },
+      onError: (_) {
+        if (!done.isCompleted) done.complete();
+      },
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+
+    abort.abort();
+    await done.future.timeout(const Duration(seconds: 2));
+    expect(result.trace.upstreamEnd, 'client_cancelled');
+    expect(transport.cancelled, isTrue);
+    expect(body.hasListener, isFalse, reason: '取消后不应继续订阅上游流');
+    await body.close();
+  });
+
+  test('非流式响应体卡住时按超时结束，不会永久挂起', () async {
+    final cfg = config.toJson();
+    ((cfg['upstream'] as Map))['streamIdleTimeoutMs'] = 150;
+    ((cfg['policy'] as Map))['maxUpstreamRequests'] = 1;
+    config = decodeConfig(cfg);
+
+    final release = Completer<void>();
+    addTearDown(() {
+      if (!release.isCompleted) release.complete();
+    });
+    fake.chatHandler = (req, body) async {
+      try {
+        req.response.statusCode = 200;
+        req.response.headers.contentType = ContentType.json;
+        req.response.write('{"id":');
+        await req.response.flush();
+        await release.future;
+        await req.response.close();
+      } catch (_) {}
+    };
+
+    final sw = Stopwatch()..start();
+    final result = await engine.route(input('gemini-3.8-flash', stream: false));
+    expect(sw.elapsed, lessThan(const Duration(seconds: 3)));
+    expect(result, isA<RouteErrorResult>());
+  });
+
+  test('非 200 响应体卡住时仍按状态码分类', () async {
+    final cfg = config.toJson();
+    ((cfg['upstream'] as Map))['streamIdleTimeoutMs'] = 100;
+    ((cfg['policy'] as Map))['maxUpstreamRequests'] = 1;
+    config = decodeConfig(cfg);
+
+    final release = Completer<void>();
+    addTearDown(() {
+      if (!release.isCompleted) release.complete();
+    });
+    fake.chatHandler = (req, body) async {
+      try {
+        req.response.statusCode = 429;
+        req.response.headers.contentType = ContentType.json;
+        req.response.write('{"error":');
+        await req.response.flush();
+        await release.future;
+        await req.response.close();
+      } catch (_) {}
+    };
+
+    final sw = Stopwatch()..start();
+    final result = await engine.route(input('gemini-3.8-flash'));
+    expect(sw.elapsed, lessThan(const Duration(seconds: 3)));
+    expect(result, isA<RouteErrorResult>());
+    // 已经有状态码就不该退化成连接异常。
+    expect((result as RouteErrorResult).status, 429);
+  });
+}
+
+/// 可控的假传输：记录 cancel 是否被调用，避免依赖平台 socket 行为。
+class _RecordingTransport implements Transport {
+  _RecordingTransport(this.statusCode, this.body, {this.onCancel});
+
+  final int statusCode;
+  final Stream<List<int>> body;
+
+  /// 模拟真实连接被 abort：关闭 body 流，让挂起的 moveNext 结束。
+  final void Function()? onCancel;
+  bool cancelled = false;
+
+  @override
+  Future<UpstreamResponse> send(
+    UpstreamRequest request, {
+    required Duration firstEventTimeout,
+  }) async =>
+      UpstreamResponse(
+        statusCode: statusCode,
+        headers: const {'content-type': 'text/event-stream'},
+        body: body,
+        cancel: () async {
+          cancelled = true;
+          onCancel?.call();
+        },
+        headerLatencyMs: 0,
+      );
+
+  @override
+  Future<void> close() async {}
 }

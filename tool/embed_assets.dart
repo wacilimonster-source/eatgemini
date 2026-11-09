@@ -1,10 +1,15 @@
 /// 把 assets/ui 编进 Dart 源码，生成 lib/src/console/assets.g.dart。
 ///
+/// favicon.ico 不落在磁盘：由托盘同一光栅化器（tray_glyph.dart）在构建期
+/// 生成后内嵌，保证任务栏图标与托盘图标同几何同色。
+///
 /// 构建期会拒绝任何外部链接（桌面文档 §7 N2）。
 library;
 
 import 'dart:convert';
 import 'dart:io';
+
+import 'package:eatgemini/src/desktop/tray_glyph.dart';
 
 Future<void> main(List<String> args) async {
   final root = Directory.current;
@@ -37,7 +42,11 @@ Future<void> main(List<String> args) async {
         .replaceFirst(RegExp(r'^/'), '');
     final bytes = file.readAsBytesSync();
     final text = _looksText(rel) ? utf8.decode(bytes, allowMalformed: true) : '';
-    if (text.contains('http://') || text.contains('https://')) {
+    // xmlns / xlink 命名空间是标识符不是外链资源（内联 SVG 需要）。
+    final scanned = text
+        .replaceAll('http://www.w3.org/2000/svg', '')
+        .replaceAll('http://www.w3.org/1999/xlink', '');
+    if (scanned.contains('http://') || scanned.contains('https://')) {
       stderr.writeln('外部链接不被允许：$rel');
       violations++;
     }
@@ -53,6 +62,17 @@ Future<void> main(List<String> args) async {
       ..writeln('  ),');
   }
 
+  // favicon.ico：托盘同款光栅化器生成（任务栏图标与托盘一致，精确帧不糊）。
+  final favicon = buildFaviconIco();
+  buffer
+    ..writeln("  '/ui/favicon.ico': EmbeddedAsset(")
+    ..writeln("    mime: 'image/x-icon',")
+    ..writeln('    bytes: const <int>[')
+    ..writeln(_wrapBytes(favicon))
+    ..writeln('    ],')
+    ..writeln("    etag: '\"${favicon.length}-${_fnv(favicon)}\"',")
+    ..writeln('  ),');
+
   buffer
     ..writeln('};')
     ..writeln()
@@ -66,7 +86,7 @@ Future<void> main(List<String> args) async {
 
   final out = File('lib/src/console/assets.g.dart');
   out.writeAsStringSync(buffer.toString(), flush: true);
-  stdout.writeln('已生成 ${out.path}（${files.length} 个文件）');
+  stdout.writeln('已生成 ${out.path}（${files.length} 个文件 + favicon.ico）');
 }
 
 bool _looksText(String name) =>

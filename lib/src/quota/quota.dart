@@ -230,6 +230,10 @@ class QuotaManager {
     final raw = await store.read();
     _buckets.clear();
     _models.clear();
+    // 项目级封锁属于“旧项目”的事实：换项目或没有状态时必须一起清掉，
+    // 否则新项目一启动就是 project_blocked（G13）。
+    _projectBlockedUntilMs = null;
+    _projectReason = null;
     if (raw == null) {
       _loaded = true;
       return;
@@ -268,7 +272,10 @@ class QuotaManager {
   /// 跨日重置：只清日桶与"疑似日耗尽"，分钟窗口与权限状态保留。
   void rollover(DateTime now) {
     final day = clock.dayKey(now.toUtc());
+    final nowMs = now.toUtc().millisecondsSinceEpoch;
     for (final b in _buckets.values) {
+      // 所有维度统一清理过期分钟事件，避免日桶（RPD）的事件只增不减（G4）。
+      _pruneMinute(b, nowMs);
       if (b.dimension == QuotaDimension.rpd && b.quotaDay != day) {
         b.quotaDay = day;
         b.localAttempts = 0;
@@ -430,17 +437,19 @@ class QuotaManager {
     for (final entry in spec.quotaGroups.entries) {
       final b = _bucketFor(entry.value, entry.key, now);
       keys.add(b.key);
-      b.minuteEvents.add(nowMs);
+      // RPD 桶不需要分钟窗口；只有 RPM/TPM 记账，避免日桶事件无限累积。
+      if (entry.key == QuotaDimension.rpm) {
+        b.minuteEvents.add(nowMs);
+      }
       if (entry.key == QuotaDimension.tpm) {
+        b.minuteEvents.add(nowMs);
         b.tokenEvents.add((nowMs, estTokens));
       }
       if (entry.key == QuotaDimension.rpd) {
+        final wasAtLimit = b.limit != null && b.localAttempts >= b.limit!;
         b.localAttempts++;
-        if (b.localAttempts > (b.limit ?? 0) &&
-            b.limit != null &&
-            b.lastProbeMs == null) {
-          b.lastProbeMs = nowMs;
-        }
+        // 本次是被放行的探测：刷新时间戳，下一次必须再等一个间隔（G3）。
+        if (wasAtLimit) b.lastProbeMs = nowMs;
       }
     }
     _modelState(modelId).lastAttemptMs = nowMs;
@@ -457,18 +466,25 @@ class QuotaManager {
   }
 
   /// 确定未发送：释放预留（目前只在本地未发出时调用，保留接口）。
+  ///
+  /// 只移除本次预留写入的事件：并发下“删最后一条”会把别的请求的
+  /// 计数删掉（M8）。
   void releaseUnsent(Reservation r) {
     if (r.released || r.committed) return;
     r.released = true;
-    final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
     for (final key in r.bucketKeys) {
       final b = _buckets[key];
       if (b == null) continue;
-      b.minuteEvents.removeLastWhere((_) => true, orElse: () => 0);
+      final mi = b.minuteEvents.lastIndexOf(r.atMs);
+      if (mi >= 0) b.minuteEvents.removeAt(mi);
       if (b.dimension == QuotaDimension.rpd && b.localAttempts > 0) {
         b.localAttempts--;
       }
-      b.tokenEvents.removeWhere((e) => e.$1 >= nowMs - 1000);
+      if (b.dimension == QuotaDimension.tpm) {
+        final ti = b.tokenEvents
+            .lastIndexWhere((e) => e.$1 == r.atMs && e.$2 == r.estTokens);
+        if (ti >= 0) b.tokenEvents.removeAt(ti);
+      }
     }
     _dirty = true;
   }
@@ -629,7 +645,10 @@ class QuotaManager {
     return true;
   }
 
-  /// 清空所有本地估算（保留上游确认的封锁）。
+  /// 清空所有本地估算（保留上游确认的封锁、模型级冷却与项目级封锁）。
+  ///
+  /// 语义是“只清本地估算”：模型级 cooldown 与项目级封锁同样是上游
+  /// 事实，清掉会立刻再次触发 429（G14）。
   void clearAllLocalEstimates() {
     for (final b in _buckets.values) {
       if (b.confirmedBlockedUntilMs != null) continue;
@@ -642,9 +661,6 @@ class QuotaManager {
       b.evidence = null;
       b.confidence = null;
     }
-    _models.clear();
-    _projectBlockedUntilMs = null;
-    _projectReason = null;
     _dirty = true;
     scheduleFlush();
   }
@@ -728,18 +744,6 @@ class QuotaManager {
     _dirty = true;
     scheduleFlush();
     await _flushChain;
-  }
-}
-
-extension _ListExt<T> on List<T> {
-  void removeLastWhere(bool Function(T) test, {required T Function() orElse}) {
-    for (var i = length - 1; i >= 0; i--) {
-      if (test(this[i])) {
-        removeAt(i);
-        return;
-      }
-    }
-    orElse();
   }
 }
 

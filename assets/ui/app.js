@@ -33,7 +33,7 @@ const S = {
 // 24 网格 / stroke 1.75 / round cap·join / currentColor（设计规范 §04）。
 // 内联 SVG 在 HTML 中无需命名空间声明；构建期扫描拒绝外部链接字面量，故由此注入。
 const SPRITE_DEFS = `<defs>
-<symbol id="i-gem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7.5 6L12 21 4.5 9 12 3z"/><path d="M4.5 9h15"/><path d="M12 3L9 9l3 12 3-12-3-6"/></symbol>
+<symbol id="i-gem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M7.3 3.5h9.4L21 9.2 12 20.5 3 9.2 7.3 3.5z"/><path d="M3 9.2h18"/><path d="M7.3 3.5l2.3 5.7L12 20.5l2.4-11.3 2.3-5.7"/></symbol>
 <symbol id="i-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-6.5 4.5 13L16.5 12H21"/></symbol>
 <symbol id="i-quota" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.66 3.13 3 7 3s7-1.34 7-3V6"/><path d="M5 12v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6"/></symbol>
 <symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 6h12M8.5 12h12M8.5 18h12"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></symbol>
