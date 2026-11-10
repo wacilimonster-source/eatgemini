@@ -1,9 +1,19 @@
-/// 托盘 isolate（桌面文档 §14）：message-only 窗口 + Shell_NotifyIconW。
+/// 托盘 isolate（桌面文档 §14）：隐藏顶层工具窗口 + Shell_NotifyIconW。
 ///
 /// 消息循环阻塞在本 isolate 线程上；主 isolate 的命令经 SendPort 到达事件
 /// 循环，由循环每轮的 await 空隙处理——因此主 isolate 每次发命令后都要
 /// PostMessage(_wakeMsg) 唤醒 GetMessage。WndProc 是静态回调不能捕获上下文，
-/// 它只记录事件标志，动作统一由 Dart 侧循环执行。
+/// 但可以调用同 isolate 的顶层函数：点击类动作（弹菜单、转发 open）在
+/// WndProc 里**同步**完成——经事件循环中转实测会被鼠标消息洪峰拖慢
+/// 140~1300ms（SillyTavernDesktop/GrandetToken 的托盘都是同步处理点击）；
+/// 菜单命令、重加图标等仍由 Dart 侧循环统一执行。
+///
+/// NOTIFYICON_VERSION_4：v0/v3 的鼠标 UP 会被 Shell 扣住
+/// GetDoubleClickTime（本机实测 500ms）做双击判定，右键菜单/双击因此
+/// 「不跟手」；v4 的 WM_CONTEXTMENU / 鼠标消息立即投递（v4 下 lParam 为
+/// MAKELONG(事件, 图标ID)，v0/v3 的 lParam 就是原始鼠标消息，两种编码都
+/// 兼容，SETVERSION 万一失败时仍按 v0 行为工作）。v4 会抑制标准 tooltip，
+/// 所以 NIF_TIP 必须搭配 NIF_SHOWTIP。
 ///
 /// 协议见 tray_protocol.dart。托盘 isolate 不接收任何密钥（§7.3）。
 library;
@@ -34,8 +44,8 @@ const int _trayIconId = 1;
 int _hwnd = 0;
 int _taskbarCreatedMsg = 0;
 bool _added = false;
-bool _menuRequested = false;
-bool _openRequested = false;
+bool _menuTracking = false; // TrackPopupMenu 正在模态跟踪
+int _menuClosedTick = 0; // 菜单关闭时刻：吞掉「关闭菜单的那次点击」的回放
 bool _reAddRequested = false;
 DateTime? _lastOpenForward;
 int _menuCommand = 0;
@@ -105,9 +115,17 @@ Future<void> trayIsolateMain(Object raw) async {
       return;
     }
 
+    // 必须是顶层窗口而不是 message-only（HWND_MESSAGE）：
+    // 1) KB135788 要求菜单弹出前 SetForegroundWindow 成功，而 message-only
+    //    窗口不在 Z 序里、永远不能成为前台，每次调用都静默失败——菜单焦点
+    //    不正常：点外面不消失、悬停/首次点击被当成「激活第一次点击」吞掉，
+    //    右键菜单表现为「不跟手、卡顿」。
+    // 2) TaskbarCreated 这类 HWND_BROADCAST 广播只投递给顶层窗口，
+    //    message-only 窗口永远收不到，Explorer 重启后的重加图标是死代码。
+    // WS_EX_TOOLWINDOW + 从不 ShowWindow：不进任务栏与 Alt-Tab，不可见。
     _hwnd = CreateWindowEx(
-      0, className, className, 0, 0, 0, 0, 0,
-      HWND_MESSAGE, NULL, hInstance, nullptr,
+      WS_EX_TOOLWINDOW, className, className, WS_POPUP, 0, 0, 0, 0,
+      NULL, NULL, hInstance, nullptr,
     );
     if (_hwnd == 0) {
       reply.send({'error': 'CreateWindowExW 失败'});
@@ -177,11 +195,30 @@ Future<void> trayIsolateMain(Object raw) async {
 
 int _trayWndProc(int hwnd, int msg, int wParam, int lParam) {
   if (msg == _callbackMsg) {
-    if (lParam == WM_RBUTTONUP) _menuRequested = true;
-    // 左键单击即打开（气泡文案承诺“单击托盘图标重新打开”）；双击时系统会
-    // 先补发一次 UP 再发 DBLCLK，由 _runPendingActions 的防抖合并成一次。
-    if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
-      _openRequested = true;
+    // v4：lParam 的 LOWORD 是通知事件（WM_CONTEXTMENU / 鼠标消息…），
+    // HIWORD 是图标 ID；v0/v3：lParam 就是原始鼠标消息。用 LOWORD 比较
+    // 两种编码都覆盖（SETVERSION 万一失败退回 v0 行为时仍能工作）。
+    final lo = lParam & 0xFFFF;
+    // 右键 → 菜单必须在消息处理的**当场**同步弹出（SillyTavernDesktop 的
+    // WinForms NotifyIcon、GrandetToken 的 Tauri 托盘都是这么做的，所以
+    // 跟手）。此前经 _runPendingActions 延迟到 Dart 事件循环，实测鼠标
+    // 滚动消息洪峰期间 WM_CONTEXTMENU → 菜单出现被拖到 140~1300ms。
+    //
+    // 防重开双保险：
+    // 1. _menuTracking 挡掉模态循环期间派发的消息；
+    // 2. 菜单被右键点外面关闭时，那次点击的 UP/CONTEXTMENU 会在
+    //    TrackPopupMenu 返回后回放给本窗口，不吞掉的话菜单一关立刻又
+    //    重开——关闭后 400ms 内的菜单请求一律视为回放。
+    if (lo == WM_CONTEXTMENU || lParam == WM_RBUTTONUP) {
+      if (!_menuTracking && GetTickCount() - _menuClosedTick > 400) {
+        _showMenu();
+      }
+    }
+    // 双击才打开监控窗口。v4 下双击序列是
+    // (DOWN,UP,SELECT)(DOWN,UP,SELECT)(DBLCLK,UP,SELECT)，
+    // 只认 DBLCLK，单击的 NIN_SELECT/UP 一律忽略。
+    if (lo == WM_LBUTTONDBLCLK) {
+      if (!_menuTracking) _forwardOpen();
     }
     return 0;
   }
@@ -202,18 +239,18 @@ int _trayWndProc(int hwnd, int msg, int wParam, int lParam) {
   return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-void _runPendingActions() {
-  if (_openRequested) {
-    _openRequested = false;
-    // 防抖：单击+双击的连发合并成一次打开（800ms 窗口内的重复请求丢弃）。
-    final now = DateTime.now();
-    if (_lastOpenForward == null ||
-        now.difference(_lastOpenForward!) >
-            const Duration(milliseconds: 800)) {
-      _lastOpenForward = now;
-      _actions?.send({'action': trayActionOpen});
-    }
+/// 双击 → 打开监控窗口。防抖：800ms 窗口内的连发合并成一次。
+/// 在 WndProc 里同步调用，不经过事件循环。
+void _forwardOpen() {
+  final now = DateTime.now();
+  if (_lastOpenForward == null ||
+      now.difference(_lastOpenForward!) > const Duration(milliseconds: 800)) {
+    _lastOpenForward = now;
+    _actions?.send({'action': trayActionOpen});
   }
+}
+
+void _runPendingActions() {
   if (_menuCommand != 0) {
     final cmd = _menuCommand;
     _menuCommand = 0;
@@ -229,10 +266,6 @@ void _runPendingActions() {
       case _menuAutostart:
         _actions?.send({'action': trayActionToggleAutostart});
     }
-  }
-  if (_menuRequested) {
-    _menuRequested = false;
-    _showMenu();
   }
   if (_reAddRequested) {
     _reAddRequested = false;
@@ -270,13 +303,13 @@ bool _addIcon() {
     ..cbSize = sizeOf<NOTIFYICONDATA>()
     ..hWnd = _hwnd
     ..uID = _trayIconId
-    ..uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+    ..uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP
     ..uCallbackMessage = _callbackMsg
     ..hIcon = _icons[_iconKey]!
     ..szTip = _tooltip;
   final ok = Shell_NotifyIcon(NIM_ADD, nid) != 0;
   if (!ok) return false;
-  r.Anonymous.uVersion = NOTIFYICON_VERSION;
+  r.Anonymous.uVersion = NOTIFYICON_VERSION_4;
   Shell_NotifyIcon(NIM_SETVERSION, nid);
   _added = true;
   return true;
@@ -285,7 +318,7 @@ bool _addIcon() {
 void _modifyIcon() {
   final nid = _nid!;
   nid.ref
-    ..uFlags = NIF_ICON | NIF_TIP
+    ..uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP
     ..hIcon = _icons[_iconKey] ?? _icons.values.first
     ..szTip = _tooltip;
   Shell_NotifyIcon(NIM_MODIFY, nid);
@@ -363,15 +396,19 @@ void _showMenu() {
   _append(menu, _menuExit, '退出 eatgemini');
 
   final arena = Arena();
+  _menuTracking = true;
   try {
     final pt = arena<POINT>();
     GetCursorPos(pt);
     // KB135788：菜单消失前需要前台窗口；关闭后再发 WM_NULL 修复焦点。
+    // 现在持有的是真顶层窗口，这条才会真正生效。
     SetForegroundWindow(_hwnd);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.ref.x, pt.ref.y,
         0, _hwnd, nullptr);
     PostMessage(_hwnd, WM_NULL, 0, 0);
   } finally {
+    _menuTracking = false;
+    _menuClosedTick = GetTickCount();
     arena.releaseAll();
   }
   DestroyMenu(menu);

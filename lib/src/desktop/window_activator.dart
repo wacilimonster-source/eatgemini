@@ -20,6 +20,14 @@ const String kMonitorWindowTitle = 'eatgemini 监控';
 /// 真正带到可见最前（不需要前台权限），再用 AttachThreadInput 临时共享
 /// 前台线程输入队列来提高抢前台的成功率。
 /// 循环有硬性上限并按 hwnd 去重，绝不会卡死调用线程。
+///
+/// 成功判定必须诚实：激活后 `GetForegroundWindow() == hwnd` 才算数。
+/// 曾无条件按「找到可见窗口即成功」返回，结果其他虚拟桌面（被 DWM
+/// cloak）等状态下的窗口置顶后根本不出现在用户眼前，托盘点击表现为
+/// 「点了没反应」；现在这种激活失败会如实返回 false，让上层
+/// ShellExecute 开新标签，点击至少有可见结果。托盘点击让本进程持有
+/// 最后一次输入，SetForegroundWindow 通常会被放行，误开重复标签的
+/// 风险很小。
 bool activateMonitorWindow({String title = kMonitorWindowTitle}) {
   if (!Platform.isWindows) return false;
   final nativeTitle = title.toNativeUtf16();
@@ -33,6 +41,19 @@ bool activateMonitorWindow({String title = kMonitorWindowTitle}) {
       hwnd = FindWindowEx(0, hwnd, nullptr, nativeTitle);
       if (hwnd == 0 || !seen.add(hwnd)) break;
       if (IsWindowVisible(hwnd) == 0) continue;
+
+      // 被其他虚拟桌面 cloak 的窗口置顶也不会出现在当前桌面。
+      final arena = Arena();
+      try {
+        final cloaked = arena<Uint32>()..value = 0;
+        if (DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, cloaked,
+                sizeOf<Uint32>()) ==
+            0) {
+          if (cloaked.value != 0) continue;
+        }
+      } finally {
+        arena.releaseAll();
+      }
 
       ShowWindow(hwnd, SW_RESTORE);
       SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
@@ -48,9 +69,7 @@ bool activateMonitorWindow({String title = kMonitorWindowTitle}) {
       }
       SetForegroundWindow(hwnd);
       if (attached) AttachThreadInput(myThread, fgThread, FALSE);
-      // TOPMOST→NOTOPMOST 已让窗口可见最前，不必强求键盘焦点也算子成功；
-      // 否则会误判成「没有窗口」而反复打开新的浏览器标签。
-      activated = true;
+      if (GetForegroundWindow() == hwnd) activated = true;
     }
     return activated;
   } finally {

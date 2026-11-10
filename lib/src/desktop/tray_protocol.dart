@@ -121,5 +121,5 @@ const List<String> trayMenuLines = [
 /// 首次关窗气泡（§4.4 / F12：一次性提示，之后不再弹）。
 const String trayCloseHintTitle = 'eatgemini 仍在运行';
 const String trayCloseHintText =
-    '窗口已收纳到任务栏托盘（右下角 ^ 折叠图标里），网关继续在后台工作。'
-    '单击托盘图标可重新打开窗口，右键可退出。';
+    '窗口已收纳到任务栏托盘，网关继续在后台工作。'
+    '双击托盘图标可重新打开窗口，右键可退出。';

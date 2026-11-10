@@ -899,10 +899,13 @@ const Map<String, EmbeddedAsset> kUiAssets = {
 
 ## 十四、托盘
 
-- 实现：独立 isolate 中创建 message-only 窗口（`HWND_MESSAGE`）、`Shell_NotifyIconW(NIM_ADD)`、`GetMessageW` 循环。与主 isolate 通过 `SendPort` 交换消息：主 → 托盘 `{state, tooltip}`；托盘 → 主 `{action}`。
+- 实现：独立 isolate 中创建**隐藏的顶层工具窗口**（`WS_POPUP` + `WS_EX_TOOLWINDOW`，从不 `ShowWindow`）、`Shell_NotifyIconW(NIM_ADD)`、`GetMessageW` 循环。与主 isolate 通过 `SendPort` 交换消息：主 → 托盘 `{state, tooltip}`；托盘 → 主 `{action}`。不用 message-only 窗口（`HWND_MESSAGE`）：它不在 Z 序里，`SetForegroundWindow` 永远失败，KB135788 菜单焦点修复无法生效（右键菜单「不跟手」），也收不到 `TaskbarCreated` 广播。
+- 图标版本用 `NOTIFYICON_VERSION_4`（`NIM_SETVERSION`）：v0/v3 的鼠标 UP 被 Shell 扣住 `GetDoubleClickTime` 做双击判定（实测 ~500ms），v4 的消息即时投递。v4 下 lParam 为 `MAKELONG(事件, 图标ID)`；标准 tooltip 被抑制，`NIF_TIP` 搭配 `NIF_SHOWTIP`。
+- 点击在 WndProc 里**同步**处理（右键当场 `TrackPopupMenu`，双击当场转发打开）：经事件循环中转会被鼠标消息洪峰拖慢数百 ms。防菜单重开：模态期间 `_menuTracking` + 关闭后 400ms 内视为点击回放。
+- 图标折叠/可见完全遵循 Windows 任务栏设置，应用不改写 `NotifyIconSettings\IsPromoted`。
 - 处理 `TaskbarCreated` 广播消息：Explorer 重启后重新 `NIM_ADD`。
 - 提示文字：`eatgemini · 运行中 · 今日 42 次`（≤ 127 字符）。
-- 双击：打开监控窗口。
+- 双击：打开监控窗口（单击不动作）。
 - 右键菜单：
 
 ```text

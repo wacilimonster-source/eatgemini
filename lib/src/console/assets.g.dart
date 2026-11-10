@@ -7325,4 +7325,4 @@ const Map<String, EmbeddedAsset> kUiAssets = {
 };
 
 /// 构建时间（仅诊断展示）。
-const String kUiBuiltAt = '2026-11-10T15:33:52.339572Z';
+const String kUiBuiltAt = '2026-11-10T17:37:46.608923Z';
