@@ -1161,7 +1161,10 @@ class AppController implements ConsoleHost {
       logger.info('已前置现有监控窗口（无需重新启动浏览器）', tag: 'window');
       return;
     }
-    final result = await browser.open(console.launchUri());
+    // 没有可见窗口时改用 ShellExecute 由 shell 打开，而不是 --app= 启动 Edge：
+    // 专用 profile 一旦有驻留的 Edge 进程，后续 --app= 请求会被它吞掉，
+    // 既不新建窗口也不显示（Process.start 却报告成功）→ 托盘点击像没反应。
+    final result = await browser.openVisible(console.launchUri());
     if (result.message != null) {
       logger.warn(result.message!, tag: 'window');
     }

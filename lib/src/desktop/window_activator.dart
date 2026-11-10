@@ -48,9 +48,9 @@ bool activateMonitorWindow({String title = kMonitorWindowTitle}) {
       }
       SetForegroundWindow(hwnd);
       if (attached) AttachThreadInput(myThread, fgThread, FALSE);
-      // 只有真正抢到前台才算快速路径成功；否则 openWindow() 会回退启动
-      // 浏览器，保证托盘点击一定有反馈，绝不会出现「点了没反应」。
-      if (GetForegroundWindow() == hwnd) activated = true;
+      // TOPMOST→NOTOPMOST 已让窗口可见最前，不必强求键盘焦点也算子成功；
+      // 否则会误判成「没有窗口」而反复打开新的浏览器标签。
+      activated = true;
     }
     return activated;
   } finally {

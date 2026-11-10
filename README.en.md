@@ -65,8 +65,8 @@ pockettavern ─┘        │  quota engine    2. gemini-2.5-flash-lite   ← t
 ## Quick start
 
 1. **Download** from the [latest Release](https://github.com/wacilimonster-source/eatgemini/releases/latest) — pick one:
-   - **Installer** `eatgemini-setup-v0.2.8.exe`: installs to `%LOCALAPPDATA%\Programs\eatgemini`, adds Start Menu shortcuts and an uninstall entry.
-   - **Portable** `eatgemini-v0.2.8.exe`: one file, double-click and run, no install needed (rename to `eatgemini.exe` if you like).
+   - **Installer** `eatgemini-setup-v0.2.9.exe`: installs to `%LOCALAPPDATA%\Programs\eatgemini`, adds Start Menu shortcuts and an uninstall entry.
+   - **Portable** `eatgemini-v0.2.9.exe`: one file, double-click and run, no install needed (rename to `eatgemini.exe` if you like).
 2. **Paste your Google AI Studio key** in the guided 3-step setup (validated first, encrypted locally with DPAPI).
 3. **Point your client** at the gateway — the Connect page gives you the exact
    SillyTavern settings and a one-line connect code for pockettavern on your phone.
@@ -114,10 +114,10 @@ the exe, then restarts it. Config and key are preserved.
 
 ```powershell
 # requires Dart SDK 3.x
-powershell -ExecutionPolicy Bypass -File tool/build.ps1 -Version 0.2.8
+powershell -ExecutionPolicy Bypass -File tool/build.ps1 -Version 0.2.9
 # → build/eatgemini.exe                 portable (GUI subsystem)
-#   build/eatgemini-v0.2.8.exe           portable release copy
-#   build/eatgemini-setup-v0.2.8.exe     installer (payload = portable exe)
+#   build/eatgemini-v0.2.9.exe           portable release copy
+#   build/eatgemini-setup-v0.2.9.exe     installer (payload = portable exe)
 #   build/update.json                    fallback manifest for update checks
 # portable only: add -SkipInstaller
 ```
