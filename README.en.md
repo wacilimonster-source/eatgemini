@@ -65,8 +65,8 @@ pockettavern ─┘        │  quota engine    2. gemini-2.5-flash-lite   ← t
 ## Quick start
 
 1. **Download** from the [latest Release](https://github.com/wacilimonster-source/eatgemini/releases/latest) — pick one:
-   - **Installer** `eatgemini-setup-v0.2.6.exe`: installs to `%LOCALAPPDATA%\Programs\eatgemini`, adds Start Menu shortcuts and an uninstall entry.
-   - **Portable** `eatgemini-v0.2.6.exe`: one file, double-click and run, no install needed (rename to `eatgemini.exe` if you like).
+   - **Installer** `eatgemini-setup-v0.2.7.exe`: installs to `%LOCALAPPDATA%\Programs\eatgemini`, adds Start Menu shortcuts and an uninstall entry.
+   - **Portable** `eatgemini-v0.2.7.exe`: one file, double-click and run, no install needed (rename to `eatgemini.exe` if you like).
 2. **Paste your Google AI Studio key** in the guided 3-step setup (validated first, encrypted locally with DPAPI).
 3. **Point your client** at the gateway — the Connect page gives you the exact
    SillyTavern settings and a one-line connect code for pockettavern on your phone.
@@ -114,10 +114,10 @@ the exe, then restarts it. Config and key are preserved.
 
 ```powershell
 # requires Dart SDK 3.x
-powershell -ExecutionPolicy Bypass -File tool/build.ps1 -Version 0.2.6
+powershell -ExecutionPolicy Bypass -File tool/build.ps1 -Version 0.2.7
 # → build/eatgemini.exe                 portable (GUI subsystem)
-#   build/eatgemini-v0.2.6.exe           portable release copy
-#   build/eatgemini-setup-v0.2.6.exe     installer (payload = portable exe)
+#   build/eatgemini-v0.2.7.exe           portable release copy
+#   build/eatgemini-setup-v0.2.7.exe     installer (payload = portable exe)
 #   build/update.json                    fallback manifest for update checks
 # portable only: add -SkipInstaller
 ```
@@ -127,7 +127,7 @@ to the installer binary as an overlay payload, so no Inno Setup / NSIS is needed
 Pushing a `v*` tag (or a manual CI run) produces all release artifacts.
 
 Or run from source: `dart run bin/eatgemini.dart --data-dir <dir>`.
-Run the test suite with `dart test` (169 tests), end-to-end smoke with `dart run tool/e2e_smoke.dart`.
+Run the test suite with `dart test` (173 tests), end-to-end smoke with `dart run tool/e2e_smoke.dart`.
 
 ## Roadmap
 
