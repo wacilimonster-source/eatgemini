@@ -7,6 +7,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:eatgemini/src/desktop/setup_payload.dart';
+
 Future<void> main(List<String> args) async {
   if (args.isEmpty) {
     stderr.writeln('用法：dart run tool/verify_release.dart <exe> [--version x.y.z]');
@@ -58,6 +60,9 @@ Future<void> main(List<String> args) async {
     'https://dart.dev',
     'https://api.dart.dev',
     'https://github.com',
+    // 检查更新：只有用户主动检查/开启自动检查才会访问这两个域名。
+    'https://api.github.com',
+    'https://raw.githubusercontent.com',
     'https://pub.dev',
     'https://storage.googleapis.com',
     'https://fonts.googleapis.com',
@@ -94,6 +99,17 @@ Future<void> main(List<String> args) async {
     try {
       tmp.deleteSync();
     } catch (_) {}
+  }
+
+  // ---- 安装版：尾部 payload 完整 ----
+  if (args.contains('--expect-payload')) {
+    final bundle = readSetupBundle(path);
+    final valid = bundle != null &&
+        bundle.payload.length > 0x40 &&
+        bundle.payload[0] == 0x4D &&
+        bundle.payload[1] == 0x5A;
+    check(valid,
+        '安装版含完整的内嵌程序（${bundle?.payload.length ?? 0} 字节）');
   }
 
   final size = bytes.length / (1024 * 1024);

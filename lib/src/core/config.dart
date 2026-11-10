@@ -322,6 +322,7 @@ class DesktopConfig {
     this.closeHintShown = false,
     this.autostart = false,
     this.projectLabelWarned = false,
+    this.autoCheckUpdates = false,
   });
 
   final bool openWindowOnStart;
@@ -330,12 +331,16 @@ class DesktopConfig {
   final bool autostart;
   final bool projectLabelWarned;
 
+  /// 启动时后台检查更新（每 24 小时最多一次）。默认关闭：不做静默联网。
+  final bool autoCheckUpdates;
+
   DesktopConfig copyWith({
     bool? openWindowOnStart,
     String? browser,
     bool? closeHintShown,
     bool? autostart,
     bool? projectLabelWarned,
+    bool? autoCheckUpdates,
   }) =>
       DesktopConfig(
         openWindowOnStart: openWindowOnStart ?? this.openWindowOnStart,
@@ -343,6 +348,7 @@ class DesktopConfig {
         closeHintShown: closeHintShown ?? this.closeHintShown,
         autostart: autostart ?? this.autostart,
         projectLabelWarned: projectLabelWarned ?? this.projectLabelWarned,
+        autoCheckUpdates: autoCheckUpdates ?? this.autoCheckUpdates,
       );
 
   Map<String, Object?> toJson() => {
@@ -351,6 +357,7 @@ class DesktopConfig {
         'closeHintShown': closeHintShown,
         'autostart': autostart,
         'projectLabelWarned': projectLabelWarned,
+        'autoCheckUpdates': autoCheckUpdates,
       };
 }
 
@@ -791,6 +798,7 @@ RouterConfig decodeConfig(Map<String, Object?> json) {
     closeHintShown: desktopR['closeHintShown'] == true,
     autostart: desktopR['autostart'] == true,
     projectLabelWarned: desktopR['projectLabelWarned'] == true,
+    autoCheckUpdates: desktopR['autoCheckUpdates'] == true,
   );
 
   final consoleR = (json['console'] is Map)

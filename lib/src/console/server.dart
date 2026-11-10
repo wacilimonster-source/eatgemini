@@ -64,6 +64,18 @@ abstract interface class ConsoleHost {
   Future<void> openDataDir();
   Future<Map<String, Object?>> setListen({String? mode, int? port});
   Future<void> requestExit();
+
+  // ---- 桌面：开机自启 / 检查更新 / 安装信息 ----
+  Map<String, Object?> autostartInfo();
+  Future<Map<String, Object?>> setAutostart(bool enabled);
+  Map<String, Object?> installationInfo();
+  Map<String, Object?> updateInfo();
+  Future<Map<String, Object?>> checkForUpdates(bool force);
+  Future<Map<String, Object?>> setAutoCheckUpdates(bool enabled);
+  Future<Map<String, Object?>> skipUpdate(String version);
+  Future<Map<String, Object?>> downloadUpdate();
+  Future<Map<String, Object?>> installUpdate();
+  Future<Map<String, Object?>> openReleasePage();
 }
 
 class ConsoleServer {
@@ -135,6 +147,10 @@ class ConsoleServer {
 
       if (path == '/ipc/show' && req.method == 'POST') {
         await _handleIpc(req);
+        return;
+      }
+      if (path == '/ipc/quit' && req.method == 'POST') {
+        await _handleIpcQuit(req);
         return;
       }
 
@@ -226,6 +242,17 @@ class ConsoleServer {
     }
     await host.openWindow();
     await _text(req, 204, '');
+  }
+
+  /// 安装器升级时请求旧实例退出：先回响应，再优雅关停（等文件锁释放）。
+  Future<void> _handleIpcQuit(HttpRequest req) async {
+    final nonce = req.headers.value('x-eatgemini-ipc');
+    if (nonce == null || nonce != _ipcNonce) {
+      await _text(req, 403, 'Forbidden');
+      return;
+    }
+    await _text(req, 204, '');
+    unawaited(host.requestExit());
   }
 
   String? _ipcNonce;
@@ -495,6 +522,54 @@ class ConsoleServer {
     if (path == '/api/app/exit' && req.method == 'POST') {
       await _json(req, 200, {'ok': true});
       unawaited(host.requestExit());
+      return;
+    }
+    // ---- 开机自启 ----
+    if (path == '/api/app/autostart' && req.method == 'GET') {
+      await _json(req, 200, host.autostartInfo());
+      return;
+    }
+    if (path == '/api/app/autostart' && req.method == 'POST') {
+      final body = await _readJson(req);
+      await _json(req, 200, await host.setAutostart(body['enabled'] == true));
+      return;
+    }
+    if (path == '/api/app/installation' && req.method == 'GET') {
+      await _json(req, 200, host.installationInfo());
+      return;
+    }
+    // ---- 检查更新 ----
+    if (path == '/api/app/update' && req.method == 'GET') {
+      await _json(req, 200, host.updateInfo());
+      return;
+    }
+    if (path == '/api/app/update/check' && req.method == 'POST') {
+      final body = await _readJson(req);
+      await _json(req, 200, await host.checkForUpdates(body['force'] == true));
+      return;
+    }
+    if (path == '/api/app/update/auto' && req.method == 'POST') {
+      final body = await _readJson(req);
+      await _json(
+          req, 200, await host.setAutoCheckUpdates(body['enabled'] == true));
+      return;
+    }
+    if (path == '/api/app/update/skip' && req.method == 'POST') {
+      final body = await _readJson(req);
+      await _json(
+          req, 200, await host.skipUpdate('${body['version'] ?? ''}'));
+      return;
+    }
+    if (path == '/api/app/update/download' && req.method == 'POST') {
+      await _json(req, 200, await host.downloadUpdate());
+      return;
+    }
+    if (path == '/api/app/update/install' && req.method == 'POST') {
+      await _json(req, 200, await host.installUpdate());
+      return;
+    }
+    if (path == '/api/app/update/open-release' && req.method == 'POST') {
+      await _json(req, 200, await host.openReleasePage());
       return;
     }
 

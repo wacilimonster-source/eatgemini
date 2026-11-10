@@ -45,6 +45,8 @@ class TrayCoordinator {
     required this.onOpenWindow,
     required this.onExit,
     this.onFirstCloseHint,
+    this.onCheckUpdate,
+    this.onToggleAutostart,
     this.log,
   });
 
@@ -56,6 +58,12 @@ class TrayCoordinator {
 
   /// 首次关窗气泡弹过后回调（持久化 closeHintShown）。
   final void Function()? onFirstCloseHint;
+
+  /// 托盘“检查更新”。
+  final void Function()? onCheckUpdate;
+
+  /// 托盘“开机自启”开关。
+  final void Function()? onToggleAutostart;
 
   final void Function(String line)? log;
 
@@ -156,6 +164,28 @@ class TrayCoordinator {
     onFirstCloseHint?.call();
   }
 
+  // ---- 菜单状态 ----
+
+  bool? _lastAutostart;
+  bool? _lastUpdateAvailable;
+
+  /// 推送开机自启勾选与更新提示；值没变就不打扰托盘消息循环。
+  void setMenuState({
+    required bool autostartEnabled,
+    required bool updateAvailable,
+  }) {
+    if (_lastAutostart == autostartEnabled &&
+        _lastUpdateAvailable == updateAvailable) {
+      return;
+    }
+    _lastAutostart = autostartEnabled;
+    _lastUpdateAvailable = updateAvailable;
+    _send(trayMenuMessage(
+      autostartEnabled: autostartEnabled,
+      updateAvailable: updateAvailable,
+    ));
+  }
+
   // ---- 内部 ----
 
   void _send(Map<String, Object?> msg) {
@@ -186,6 +216,10 @@ class TrayCoordinator {
         onOpenWindow();
       case trayActionExit:
         unawaited(onExit());
+      case trayActionCheckUpdate:
+        onCheckUpdate?.call();
+      case trayActionToggleAutostart:
+        onToggleAutostart?.call();
       case 'bye':
         _bye?.complete();
     }

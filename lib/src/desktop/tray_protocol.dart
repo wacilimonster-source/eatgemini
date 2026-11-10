@@ -1,7 +1,7 @@
 /// 托盘 isolate 协议与文案（桌面文档 §14、功能体验优化 F12）。
 ///
-/// 主 isolate → 托盘：`{'cmd': 'state'|'balloon'|'quit', ...}`
-/// 托盘 → 主 isolate：`{'action': 'open'|'copy'|'exit'}`
+/// 主 isolate → 托盘：`{'cmd': 'state'|'balloon'|'menu'|'quit', ...}`
+/// 托盘 → 主 isolate：`open` / `copy` / `exit` / `check_update` / `toggle_autostart`
 ///
 /// 本文件不含 win32，两侧与测试共用。
 library;
@@ -10,11 +10,14 @@ import 'tray_glyph.dart' show trayIconKeyForState;
 
 const String trayCmdState = 'state';
 const String trayCmdBalloon = 'balloon';
+const String trayCmdMenu = 'menu';
 const String trayCmdQuit = 'quit';
 
 const String trayActionOpen = 'open';
 const String trayActionCopy = 'copy';
 const String trayActionExit = 'exit';
+const String trayActionCheckUpdate = 'check_update';
+const String trayActionToggleAutostart = 'toggle_autostart';
 
 /// 状态推送。
 Map<String, Object?> trayStateMessage({
@@ -42,6 +45,17 @@ Map<String, Object?> trayBalloonMessage({
       'text': text,
     };
 
+/// 菜单开关状态：开机自启勾选、是否有新版本（菜单文案提示）。
+Map<String, Object?> trayMenuMessage({
+  required bool autostartEnabled,
+  required bool updateAvailable,
+}) =>
+    {
+      'cmd': trayCmdMenu,
+      'autostart': autostartEnabled,
+      'update': updateAvailable,
+    };
+
 /// 悬停提示：`eatgemini · 运行中 · 今日 42 次`（≤127 字符，§14）。
 String buildTrayTooltip({required String state, required int todayRequests}) {
   var text = 'eatgemini · ${trayStateLabel(state)} · 今日 $todayRequests 次';
@@ -61,12 +75,15 @@ String trayStateLabel(String state) => switch (state) {
       _ => '运行中',
     };
 
-/// 托盘菜单文案（§14）。
+/// 托盘菜单文案（§14 + 自启/更新入口）。
 const List<String> trayMenuLines = [
   '打开监控窗口',
   '复制网关地址',
   '──────────',
   '状态：{state}（只读）',
+  '──────────',
+  '检查更新',
+  '开机自启（可勾选）',
   '──────────',
   '退出 eatgemini',
 ];

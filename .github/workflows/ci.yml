@@ -3,7 +3,14 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '构建版本号（如 0.2.4）；tag 触发时可留空'
+        required: false
+        default: ''
 
 jobs:
   test:
@@ -23,3 +30,38 @@ jobs:
         run: dart test
       - name: E2E smoke
         run: dart run tool/e2e_smoke.dart
+
+  # 打 v* tag 或手动触发时产出便携版 + 安装版 + update.json。
+  # 发布时把三个 exe 与 update.json 中的地址对应着上传到 Release，
+  # 并把 update.json 提交到 main 根目录供检查更新回退源使用。
+  build:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ github.event.inputs.version }}"
+          $ref = "${{ github.ref }}"
+          if (-not $v -and $ref.StartsWith('refs/tags/v')) {
+            $v = "${{ github.ref_name }}".TrimStart('v')
+          }
+          if (-not $v) { $v = "0.0.0" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+      - name: Build portable + installer
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File tool/build.ps1 -Version ${{ steps.ver.outputs.version }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: eatgemini-${{ steps.ver.outputs.version }}
+          path: |
+            build/eatgemini-v*.exe
+            build/eatgemini-setup-v*.exe
+            build/update.json

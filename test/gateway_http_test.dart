@@ -164,6 +164,12 @@ void main() {
     expect(resp.statusCode, 200);
     expect(body, contains('半截'));
     expect(body, contains('incomplete_stream'));
+    // 服务端在 response.close() 之后才 emit summary；客户端读到完整响应时
+    // 可能尚未写入，轮询等待避免偶发竞态（单独跑该用例时稳定复现）。
+    final deadline = DateTime.now().add(const Duration(seconds: 2));
+    while (summaries.isEmpty && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
     expect(summaries, isNotEmpty);
     final summary = summaries.last;
     // 提交语义不变：网关成功提交并转发（含错误帧），outcome 仍为 succeeded；

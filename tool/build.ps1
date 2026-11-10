@@ -7,7 +7,8 @@
 
 param(
   [string]$Dart = "",
-  [string]$Version = "0.1.0"
+  [string]$Version = "0.1.0",
+  [switch]$SkipInstaller
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,9 +32,9 @@ function Run-Step {
   }
 }
 
-Run-Step "1/6 依赖" { & $Dart pub get }
-Run-Step "2/6 内嵌界面资源" { & $Dart run tool/embed_assets.dart }
-Run-Step "3/6 测试" { & $Dart test }
+Run-Step "1/8 依赖" { & $Dart pub get }
+Run-Step "2/8 内嵌界面资源" { & $Dart run tool/embed_assets.dart }
+Run-Step "3/8 测试" { & $Dart test }
 
 if (Test-Path "build/eatgemini.exe") {
   # 上一个版本还在运行时 Windows 不允许覆盖；先提示而不是产出半成品。
@@ -43,18 +44,42 @@ if (Test-Path "build/eatgemini.exe") {
   }
 }
 
-Run-Step "4/6 编译 exe" {
+Run-Step "4/8 编译便携版 exe" {
   if (!(Test-Path "build")) { New-Item -ItemType Directory "build" | Out-Null }
   # -D 的值必须整体加引号，否则 PowerShell 不会展开变量（实测得到字面量 $Version）。
   $defines = @("-DAPP_VERSION=$Version")
   if ($commit) { $defines += "-DGIT_COMMIT=$commit" }
   & $Dart compile exe bin/eatgemini.dart -o build/eatgemini.exe @defines
 }
-Run-Step "5/6 修改 PE 子系统为 GUI" {
+Run-Step "5/8 便携版改 GUI 子系统" {
   & $Dart run tool/set_subsystem.dart build/eatgemini.exe --gui
 }
-Run-Step "6/6 发布校验" {
-  & $Dart run tool/verify_release.dart build/eatgemini.exe --version $Version
+
+if (!$SkipInstaller) {
+  Run-Step "6/8 编译安装器并附加 payload" {
+    $setupDefines = @("-DSETUP_VERSION=$Version")
+    if ($commit) { $setupDefines += "-DGIT_COMMIT=$commit" }
+    & $Dart compile exe bin/installer.dart -o build/eatgemini-setup-base.exe @setupDefines
+    & $Dart run tool/set_subsystem.dart build/eatgemini-setup-base.exe --gui
+    & $Dart run tool/attach_payload.dart build/eatgemini-setup-base.exe `
+      build/eatgemini.exe "build/eatgemini-setup-v$Version.exe"
+  }
+  Run-Step "7/8 生成发布文件与 update.json" {
+    Copy-Item "build/eatgemini.exe" "build/eatgemini-v$Version.exe" -Force
+    & $Dart run tool/make_update_manifest.dart --version $Version --out build/update.json
+  }
 }
 
-Write-Host "完成：build/eatgemini.exe"
+Run-Step "8/8 发布校验" {
+  & $Dart run tool/verify_release.dart build/eatgemini.exe --version $Version
+  if (!$SkipInstaller) {
+    & $Dart run tool/verify_release.dart "build/eatgemini-setup-v$Version.exe" `
+      --version $Version --expect-payload
+  }
+}
+
+if (!$SkipInstaller) {
+  Write-Host "完成：build/eatgemini.exe（便携版） + build/eatgemini-setup-v$Version.exe（安装版）"
+} else {
+  Write-Host "完成：build/eatgemini.exe（便携版）"
+}

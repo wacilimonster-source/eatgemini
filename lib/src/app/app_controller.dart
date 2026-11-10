@@ -15,8 +15,12 @@ import '../core/config.dart';
 import '../core/router_engine.dart';
 import '../http/gateway_server.dart';
 import '../core/telemetry.dart';
+import '../desktop/autostart.dart';
 import '../desktop/browser_launcher.dart';
+import '../desktop/install_layout.dart';
 import '../desktop/tray_coordinator.dart';
+import '../desktop/update.dart';
+import '../desktop/win_registry.dart';
 import '../observe/observability.dart';
 import '../quota/quota.dart';
 import '../secrets/dpapi.dart';
@@ -78,6 +82,11 @@ class AppController implements ConsoleHost {
   DateTime _startedAt = DateTime.now().toUtc();
   ListenConfig? _activeListen;
   bool _transportReady = false;
+  AutostartManager? _autostart;
+  UpdateChecker? _updates;
+  InstallationInfo? _installation;
+  Timer? _updateTimer;
+  bool _updateNotified = false;
   final List<DartIoTransport> _retiredTransports = [];
   final Map<String, Map<String, Object?>> _inflight = {};
   final Map<String, Map<String, Object?>> _lastSeen = {};
@@ -162,6 +171,26 @@ class AppController implements ConsoleHost {
       _configError = true;
       _configErrorMessage = e.toString();
       config = defaultConfig();
+    }
+
+    // ---- 桌面：安装形态、开机自启、检查更新 ----
+    _installation = readInstallation();
+    _autostart = AutostartManager(
+      registry: const WindowsRegistry(),
+      executablePath: Platform.resolvedExecutable,
+    );
+    if (config.desktop.autostart && _autostart!.repairIfStale()) {
+      logger.info('开机自启指向旧路径，已修正为当前 exe', tag: 'app');
+    }
+    _updates = UpdateChecker(
+      currentVersion: version,
+      updatesDir: dataDir.updates,
+      configureClient: (client) =>
+          applyProxyToClient(client, config.upstream.proxy),
+    );
+    await _updates!.load();
+    if (config.desktop.autoCheckUpdates) {
+      _startAutoUpdateCheck();
     }
 
     requestLog = RequestLog(
@@ -372,6 +401,16 @@ class AppController implements ConsoleHost {
         'reason': appStatus().reason,
         'version': version,
         'startedAt': _startedAt.toIso8601String(),
+      },
+      'desktop': {
+        'autostart': _autostart?.describe().enabled ?? false,
+        'autoCheckUpdates': config.desktop.autoCheckUpdates,
+        'installation': (_installation ?? readInstallation()).toJson(),
+      },
+      'update': {
+        'hasUpdate': _updates?.state.hasUpdate(version) ?? false,
+        'latestVersion': _updates?.state.latestVersion,
+        'checking': _updates?.checking ?? false,
       },
       'gateway': {
         'listenMode': config.listen.mode.name,
@@ -1031,6 +1070,8 @@ class AppController implements ConsoleHost {
       onOpenWindow: openWindow,
       onExit: requestExit,
       onFirstCloseHint: _markCloseHintShown,
+      onCheckUpdate: () => unawaited(_checkUpdateFromTray()),
+      onToggleAutostart: () => unawaited(_toggleAutostartFromTray()),
       log: (line) => logger.info(line, tag: 'tray'),
     );
     _tray = tray;
@@ -1038,6 +1079,7 @@ class AppController implements ConsoleHost {
     logger.info(tray.running ? '托盘已就绪' : '托盘不可用（非 Windows 或启动失败）',
         tag: 'tray');
     _pushTrayState();
+    _pushTrayMenuState();
     _trayTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (_stopping) return;
       _pushTrayState();
@@ -1055,6 +1097,7 @@ class AppController implements ConsoleHost {
       todayRequests: todayRequests,
       gatewayUrl: gatewayBaseUrl,
     );
+    _pushTrayMenuState();
     // 首次进入错误态时气泡提醒（F12；额度用完不弹，避免打扰）。
     if (_lastTrayState != status.state) {
       if (!_isErrorState(_lastTrayState) &&
@@ -1121,9 +1164,220 @@ class AppController implements ConsoleHost {
     await shutdown();
   }
 
+  // -------------------------------------------------- 桌面：开机自启 / 检查更新
+
+  @override
+  Map<String, Object?> autostartInfo() =>
+      _autostart?.describe().toJson() ??
+      const {'supported': false, 'enabled': false};
+
+  @override
+  Future<Map<String, Object?>> setAutostart(bool enabled) async {
+    final manager = _autostart;
+    if (manager == null || !manager.supported) {
+      return {'ok': false, 'message': '当前平台不支持开机自启'};
+    }
+    if (!manager.setEnabled(enabled)) {
+      return {'ok': false, 'message': '写入注册表失败（权限不足？）'};
+    }
+    config = config.copyWith(
+      desktop: config.desktop.copyWith(autostart: enabled),
+    );
+    configStore.write(config);
+    bus.emit('config.changed', {'revision': configStore.revision});
+    _pushTrayMenuState();
+    logger.info('开机自启已${enabled ? '开启' : '关闭'}', tag: 'app');
+    return {'ok': true, ...manager.describe().toJson()};
+  }
+
+  @override
+  Map<String, Object?> installationInfo() => {
+        ...(_installation ?? readInstallation()).toJson(),
+        'executablePath': Platform.resolvedExecutable,
+      };
+
+  @override
+  Map<String, Object?> updateInfo() => _updates?.describe(
+        autoCheck: config.desktop.autoCheckUpdates,
+      ) ??
+      {
+        'currentVersion': version,
+        'autoCheck': false,
+        'hasUpdate': false,
+        'checking': false,
+      };
+
+  @override
+  Future<Map<String, Object?>> checkForUpdates(bool force) async {
+    final checker = _updates;
+    if (checker == null) return {'ok': false, 'message': '更新模块未就绪'};
+    final result = await checker.check(force: force);
+    if (result.ok) {
+      logger.info(
+        '检查更新完成：当前 $version，最新 ${checker.state.latestVersion ?? '未知'}'
+        '${result.fromCache ? '（缓存）' : ''}',
+        tag: 'update',
+      );
+    } else {
+      logger.warn('检查更新失败：${result.error}', tag: 'update');
+    }
+    bus.emit('app.update', {
+      'hasUpdate': checker.state.hasUpdate(version),
+      'latestVersion': checker.state.latestVersion,
+      'checkedAt': checker.state.lastCheckedAt,
+    });
+    _pushTrayMenuState();
+    return {
+      'ok': result.ok,
+      'fromCache': result.fromCache,
+      'busy': result.busy,
+      if (result.error != null) 'message': result.error,
+      ...checker.describe(autoCheck: config.desktop.autoCheckUpdates),
+    };
+  }
+
+  @override
+  Future<Map<String, Object?>> setAutoCheckUpdates(bool enabled) async {
+    config = config.copyWith(
+      desktop: config.desktop.copyWith(autoCheckUpdates: enabled),
+    );
+    configStore.write(config);
+    if (enabled) {
+      _startAutoUpdateCheck();
+    } else {
+      _updateTimer?.cancel();
+      _updateTimer = null;
+    }
+    bus.emit('config.changed', {'revision': configStore.revision});
+    logger.info('启动时自动检查更新已${enabled ? '开启' : '关闭'}', tag: 'update');
+    return {'ok': true, 'autoCheck': enabled};
+  }
+
+  @override
+  Future<Map<String, Object?>> skipUpdate(String versionToSkip) async {
+    final checker = _updates;
+    if (checker == null || versionToSkip.trim().isEmpty) {
+      return {'ok': false, 'message': '版本号为空'};
+    }
+    await checker.skipVersion(versionToSkip);
+    bus.emit('app.update', {'hasUpdate': false, 'skipped': versionToSkip});
+    _pushTrayMenuState();
+    return {
+      'ok': true,
+      ...checker.describe(autoCheck: config.desktop.autoCheckUpdates),
+    };
+  }
+
+  @override
+  Future<Map<String, Object?>> downloadUpdate() async {
+    final checker = _updates;
+    if (checker == null) return {'ok': false, 'message': '更新模块未就绪'};
+    try {
+      final path = await checker.downloadInstaller();
+      logger.info('已下载安装版：$path', tag: 'update');
+      bus.emit('app.update', {'installerReady': true, 'path': path});
+      return {
+        'ok': true,
+        'path': path,
+        ...checker.describe(autoCheck: config.desktop.autoCheckUpdates),
+      };
+    } catch (e) {
+      logger.warn('下载安装版失败：$e', tag: 'update');
+      return {'ok': false, 'message': '$e'};
+    }
+  }
+
+  @override
+  Future<Map<String, Object?>> installUpdate() async {
+    final checker = _updates;
+    if (checker == null) return {'ok': false, 'message': '更新模块未就绪'};
+    try {
+      await checker.runInstaller();
+      logger.info('已启动安装版升级程序', tag: 'update');
+      return {
+        'ok': true,
+        'message': '安装程序已启动：它会先请求网关退出，再完成升级并重新启动',
+      };
+    } catch (e) {
+      return {'ok': false, 'message': '$e'};
+    }
+  }
+
+  @override
+  Future<Map<String, Object?>> openReleasePage() async {
+    final url = _updates?.releasePageUrl() ?? kReleasePageUrl;
+    try {
+      final result = await Process.run(
+        'rundll32',
+        ['url.dll,FileProtocolHandler', url],
+        runInShell: false,
+      );
+      return {'ok': result.exitCode == 0};
+    } catch (e) {
+      return {'ok': false, 'message': '$e'};
+    }
+  }
+
+  void _startAutoUpdateCheck() {
+    _updateTimer?.cancel();
+    // 冷启动 15 秒后再查，避免拖慢启动；之后每 6 小时触发一次，
+    // UpdateChecker 内部按 24 小时节流。
+    _updateTimer = Timer(const Duration(seconds: 15), () {
+      unawaited(_autoCheckOnce());
+      _updateTimer = Timer.periodic(const Duration(hours: 6), (_) {
+        unawaited(_autoCheckOnce());
+      });
+    });
+  }
+
+  Future<void> _autoCheckOnce() async {
+    final checker = _updates;
+    if (_stopping || checker == null || !config.desktop.autoCheckUpdates) {
+      return;
+    }
+    final result = await checker.check();
+    if (!result.ok && !result.fromCache) {
+      logger.warn('自动检查更新失败：${result.error}', tag: 'update');
+      return;
+    }
+    if (!checker.state.hasUpdate(version)) return;
+    bus.emit('app.update', {
+      'hasUpdate': true,
+      'latestVersion': checker.state.latestVersion,
+    });
+    if (!_updateNotified) {
+      _updateNotified = true;
+      _tray?.showBalloon(
+        level: 'info',
+        title: 'eatgemini 有新版本',
+        text: 'v${checker.state.latestVersion} 已发布，可在「设置 → 桌面与更新」查看',
+      );
+    }
+    _pushTrayMenuState();
+  }
+
+  Future<void> _checkUpdateFromTray() async {
+    await openWindow();
+    await checkForUpdates(true);
+  }
+
+  Future<void> _toggleAutostartFromTray() async {
+    final current = _autostart?.describe().enabled ?? false;
+    await setAutostart(!current);
+  }
+
+  void _pushTrayMenuState() {
+    _tray?.setMenuState(
+      autostartEnabled: _autostart?.describe().enabled ?? false,
+      updateAvailable: _updates?.state.hasUpdate(version) ?? false,
+    );
+  }
+
   Future<void> shutdown() async {
     if (_stopping) return;
     _stopping = true;
+    _updateTimer?.cancel();
+    _updateTimer = null;
     bus.emit('app.stopping', {});
     logger.info('正在退出…', tag: 'app');
 

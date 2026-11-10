@@ -20,6 +20,10 @@ class DataDir {
   Directory get webview =>
       Directory('${root.path}${Platform.pathSeparator}webview');
 
+  /// 更新检查缓存与下载的安装包（安装版与便携版共用数据目录）。
+  Directory get updates =>
+      Directory('${root.path}${Platform.pathSeparator}updates');
+
   File get configFile =>
       File('${root.path}${Platform.pathSeparator}config.json');
   File get configBackup =>
@@ -31,7 +35,7 @@ class DataDir {
       '${root.path}${Platform.pathSeparator}secrets.dat';
 
   void ensure() {
-    for (final dir in [root, state, logs, exports, webview]) {
+    for (final dir in [root, state, logs, exports, webview, updates]) {
       if (!dir.existsSync()) dir.createSync(recursive: true);
     }
   }

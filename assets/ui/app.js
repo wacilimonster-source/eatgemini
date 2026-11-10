@@ -27,6 +27,7 @@ const S = {
   onboarding: { step: 1, test: 'idle', lanHint: false },
   policyOpen: false,
   configDirty: false,
+  desktop: null, // { autostart, installation, update }
 };
 
 // ---------------------------------------------------------------- 图标 sprite
@@ -330,6 +331,7 @@ function render() {
   if (S.tab === 'connect' && !S.connect) loadConnect();
   if (S.tab === 'secrets' && !S.secrets) loadSecrets();
   if (S.tab === 'settings' && !S.config) loadConfig();
+  if (S.tab === 'settings' && !S.desktop) refreshDesktopCard();
   if (S.tab === 'diag' && !S.diag) loadDiag();
 }
 
@@ -339,7 +341,15 @@ function renderTop() {
   const state = snap.app.state;
   document.getElementById('state-dot').className = `dot ${STATE_CLASS[state] || ''}`;
   document.getElementById('state-text').textContent = STATE_LABEL[state] || state;
-  document.getElementById('app-ver').textContent = snap.app.version ? `v${snap.app.version}` : '';
+  const verEl = document.getElementById('app-ver');
+  verEl.textContent = snap.app.version ? `v${snap.app.version}` : '';
+  const upd = snap.update;
+  verEl.title = upd?.hasUpdate
+    ? `发现新版本 v${upd.latestVersion || ''} · 点击前往「设置 → 桌面与更新」`
+    : `eatgemini v${snap.app.version || '—'}`;
+  verEl.style.color = upd?.hasUpdate ? 'var(--accent)' : '';
+  verEl.style.cursor = upd?.hasUpdate ? 'pointer' : '';
+  verEl.onclick = upd?.hasUpdate ? () => switchTab('settings') : null;
 
   const gw = document.getElementById('gw-url');
   gw.textContent = snap.gateway.addresses[0] || '—';
@@ -1548,6 +1558,181 @@ function renderSecrets() {
   );
 }
 
+// ---------------------------------------------------------------- 桌面与更新
+
+/** 只重绘本卡片：设置页可能有未保存的配置编辑，不能整页 render()。 */
+async function refreshDesktopCard() {
+  try {
+    const [autostart, installation, update] = await Promise.all([
+      api('/api/app/autostart'),
+      api('/api/app/installation'),
+      api('/api/app/update'),
+    ]);
+    S.desktop = { autostart, installation, update };
+  } catch (e) {
+    toast(e.message, 'err');
+    S.desktop = S.desktop || {
+      autostart: { supported: false, enabled: false },
+      installation: { mode: 'portable' },
+      update: { currentVersion: '—', hasUpdate: false },
+    };
+  }
+  const card = main.querySelector('#set-desktop');
+  if (card) card.replaceChildren(desktopCardBody());
+}
+
+function fmtIso(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false });
+}
+
+function desktopSwitch(label, desc, checked, enabled, onToggle) {
+  return h('div', { class: 'switch-row', css: { padding: '8px 0' } },
+    h('span', { class: 'switch' },
+      h('input', {
+        type: 'checkbox', checked: !!checked, disabled: !enabled,
+        onchange: async (e) => {
+          const wanted = e.target.checked;
+          try {
+            await onToggle(wanted);
+          } catch (err) {
+            toast(err.message, 'err');
+            e.target.checked = !wanted;
+          }
+          await refreshDesktopCard();
+        },
+      }),
+      h('span', { class: 'tr' }), h('span', { class: 'kn' })),
+    h('span', {},
+      h('div', { class: 'st', text: label }),
+      h('div', { class: 'sd', text: desc })));
+}
+
+function desktopCardBody() {
+  const d = S.desktop;
+  if (!d) return h('div', { class: 'muted', text: '读取中…' });
+  const a = d.autostart || {};
+  const inst = d.installation || {};
+  const u = d.update || {};
+  const hasUpdate = !!u.hasUpdate;
+  const installed = inst.mode === 'installed';
+
+  const info = h('div', { class: 'row wrap', css: { gap: '8px', margin: '10px 0 4px' } },
+    pill(`v${u.currentVersion || S.snapshot?.app?.version || '—'}`, 'line'),
+    pill(installed ? '安装版' : '便携版', installed ? 'ok' : 'line'),
+    hasUpdate ? pill(`有更新 v${u.latestVersion}`, 'accent') : null);
+  if (installed && inst.installDir) {
+    info.append(h('span', { class: 'hint', text: `安装位置：${inst.installDir}` }));
+  }
+
+  const rows = h('div', { css: { marginTop: '6px' } },
+    desktopSwitch('开机自启', a.supported === false
+      ? '当前平台不支持（仅 Windows）'
+      : '登录后后台启动，不弹出监控窗口；写入当前用户的启动项',
+    a.enabled, a.supported !== false, async (v) => {
+      const r = await api('/api/app/autostart', { method: 'POST', body: { enabled: v } });
+      if (!r.ok) throw new Error(r.message || '设置失败');
+      toast(v ? '已开启开机自启' : '已关闭开机自启');
+    }),
+    desktopSwitch('启动时自动检查更新',
+      '每 24 小时最多一次，只读取 GitHub 上的版本信息；不会上传 Key、对话或用量数据',
+      u.autoCheck, true, async (v) => {
+        const r = await api('/api/app/update/auto', { method: 'POST', body: { enabled: v } });
+        if (!r.ok) throw new Error(r.message || '设置失败');
+        toast(v ? '已开启自动检查' : '已关闭自动检查');
+      }));
+
+  const actions = h('div', { class: 'row wrap', css: { marginTop: '10px', gap: '8px' } },
+    h('button', {
+      class: 'btn btn-soft btn-sm', type: 'button', text: '检查更新',
+      onclick: async (e) => {
+        const done = busy(e.currentTarget, '检查中…');
+        try {
+          const r = await api('/api/app/update/check', { method: 'POST', body: { force: true } });
+          if (r.ok) toast(r.hasUpdate ? `发现新版本 v${r.latestVersion}` : '已是最新版本', r.hasUpdate ? 'info' : 'ok');
+          else toast(r.message || '检查失败', 'err');
+        } catch (err) { toast(err.message, 'err'); }
+        finally { done(); }
+        await refreshDesktopCard();
+      },
+    }),
+    h('button', {
+      class: 'btn btn-ghost btn-sm', type: 'button', text: '打开发布页',
+      onclick: async () => {
+        try { await api('/api/app/update/open-release', { method: 'POST' }); }
+        catch (err) { toast(err.message, 'err'); }
+      },
+    }),
+    hasUpdate && u.installerAvailable ? h('button', {
+      class: 'btn btn-primary btn-sm', type: 'button',
+      text: u.installerReady ? '重新下载安装版' : '下载安装版',
+      onclick: async (e) => {
+        const done = busy(e.currentTarget, '下载中…');
+        try {
+          const r = await api('/api/app/update/download', { method: 'POST' });
+          if (!r.ok) throw new Error(r.message || '下载失败');
+          toast('安装版已下载到数据目录 updates/');
+        } catch (err) { toast(err.message, 'err'); }
+        finally { done(); }
+        await refreshDesktopCard();
+      },
+    }) : null,
+    u.installerReady ? h('button', {
+      class: 'btn btn-primary btn-sm', type: 'button', text: '运行安装程序升级',
+      onclick: async () => {
+        const ok = await confirmDialog({
+          title: '运行安装程序？',
+          body: '安装器会先请求 eatgemini 退出，再覆盖程序并重新启动。当前配置与 Key 都会保留。',
+          okText: '开始升级', okClass: 'btn-primary', icon: 'download',
+        });
+        if (!ok) return;
+        try {
+          const r = await api('/api/app/update/install', { method: 'POST' });
+          if (!r.ok) throw new Error(r.message || '启动失败');
+          toast(r.message || '安装程序已启动', 'info');
+        } catch (err) { toast(err.message, 'err'); }
+      },
+    }) : null,
+    hasUpdate ? h('button', {
+      class: 'btn btn-ghost btn-sm', type: 'button', text: '跳过此版本',
+      onclick: async () => {
+        try {
+          await api('/api/app/update/skip', { method: 'POST', body: { version: u.latestVersion } });
+          toast(`已跳过 v${u.latestVersion}`, 'info');
+        } catch (err) { toast(err.message, 'err'); }
+        await refreshDesktopCard();
+      },
+    }) : null);
+
+  const status = h('div', { css: { marginTop: '10px' } });
+  if (u.lastError) {
+    status.append(h('div', { class: 'field-err', text: `上次检查失败：${u.lastError}` }));
+  }
+  if (u.latestVersion) {
+    status.append(h('div', {
+      class: 'small muted',
+      text: `最新版本 v${u.latestVersion} · 发布于 ${fmtIso(u.publishedAt)} · 检查于 ${fmtIso(u.lastCheckedAt)}`,
+    }));
+  } else if (u.lastCheckedAt) {
+    status.append(h('div', { class: 'hint', text: `上次检查：${fmtIso(u.lastCheckedAt)}` }));
+  }
+  if (u.notes) {
+    status.append(h('div', {
+      class: 'hint', css: { whiteSpace: 'pre-wrap', marginTop: '6px' },
+      text: String(u.notes).slice(0, 600),
+    }));
+  }
+  if (u.installerReady) {
+    status.append(h('div', { class: 'hint', text: `已下载：${u.installerPath}` }));
+  }
+
+  return h('div', {},
+    h('h3', { text: '桌面与更新' }),
+    h('div', { class: 'hint', text: '安装形态、开机自启与版本检查' }),
+    info, rows, actions, status);
+}
+
 // ---------------------------------------------------------------- 设置
 
 const POLICY_META = [
@@ -1700,7 +1885,8 @@ function renderSettings() {
     pageHead('设置', '保存后立即生效（引擎热加载），无需重启',
       unsaved,
       h('button', { class: 'btn btn-primary btn-sm', type: 'button', onclick: save }, h('span', { text: '保存' }))),
-    h('div', { class: 'card', id: 'set-routing' },
+    h('div', { class: 'card', id: 'set-desktop' }, desktopCardBody()),
+    h('div', { class: 'card', css: { marginTop: '12px' }, id: 'set-routing' },
       h('h3', { text: '路由' }), routingHtml(next)),
     h('div', { class: 'card', css: { marginTop: '12px' } },
       h('div', {
@@ -1898,6 +2084,19 @@ function subscribe() {
     noteEvent(S.snapshot?.app?.state === 'needs_key' ? 'err' : 'ok', '密钥变更', '上游 Key 已更新');
     S.secrets = null;
     refreshSnapshot();
+  });
+  es.addEventListener('app.update', (e) => {
+    let data = {};
+    try { data = JSON.parse(e.data); } catch (_) {}
+    if (data.hasUpdate) {
+      noteEvent('info', '有新版本', `eatgemini v${data.latestVersion || ''} 已发布，可在「设置」查看`);
+    }
+    if (S.snapshot?.update) {
+      S.snapshot.update.hasUpdate = !!data.hasUpdate;
+      S.snapshot.update.latestVersion = data.latestVersion;
+      renderTop();
+    }
+    if (S.tab === 'settings') refreshDesktopCard();
   });
   es.addEventListener('log', (e) => {
     const data = JSON.parse(e.data);

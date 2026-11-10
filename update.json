@@ -1,0 +1,9 @@
+{
+  "version": "0.2.6",
+  "publishedAt": "2026-11-10T14:17:15.135229Z",
+  "notes": "新增安装版、开机自启与检查更新；详见 Release 说明",
+  "releaseUrl": "https://github.com/wacilimonster-source/eatgemini/releases/tag/v0.2.6",
+  "installerUrl": "https://github.com/wacilimonster-source/eatgemini/releases/download/v0.2.6/eatgemini-setup-v0.2.6.exe",
+  "portableUrl": "https://github.com/wacilimonster-source/eatgemini/releases/download/v0.2.6/eatgemini-v0.2.6.exe",
+  "installerSize": 15427608
+}

@@ -187,6 +187,34 @@ Future<void> main(List<String> args) async {
                 m['outputTokenLimit'] == 65536),
         '模型页面 API 返回全部模型输入上下文与最大输出');
 
+    // ---- 桌面：自启 / 安装形态 / 更新（只读，不联网、不写注册表）----
+    final autostartApi = await _getWithCookie(
+        'http://127.0.0.1:$consolePort/api/app/autostart', cookie);
+    check(autostartApi.$1 == 200 &&
+            (jsonDecode(autostartApi.$2) as Map).containsKey('enabled'),
+        '开机自启状态 API 可用');
+    final installationApi = await _getWithCookie(
+        'http://127.0.0.1:$consolePort/api/app/installation', cookie);
+    check(installationApi.$1 == 200 &&
+            (jsonDecode(installationApi.$2) as Map).containsKey('mode'),
+        '安装形态 API 可用');
+    final updateApi = await _getWithCookie(
+        'http://127.0.0.1:$consolePort/api/app/update', cookie);
+    final updateBody = jsonDecode(updateApi.$2) as Map;
+    check(updateApi.$1 == 200 &&
+            updateBody['currentVersion'] == 'smoke' &&
+            updateBody['autoCheck'] == false &&
+            updateBody['hasUpdate'] == false,
+        '更新状态 API 可用且默认不自动检查');
+    check(snapApi.$2.contains('"desktop"') && snapApi.$2.contains('"update"'),
+        'snapshot 带桌面/更新状态字段');
+    final badQuit = await _post(
+      'http://127.0.0.1:$consolePort/ipc/quit',
+      {},
+      headers: {'x-eatgemini-ipc': 'wrong-nonce'},
+    );
+    check(badQuit.$1 == 403, '安装器退出 IPC 拒绝伪造 nonce');
+
     // ---- 控制台安全 ----
     final noSession = await _get('http://127.0.0.1:$consolePort/api/snapshot');
     check(noSession.$1 == 401, '无会话访问控制台 API 返回 401');

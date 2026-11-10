@@ -25,6 +25,8 @@ const int _menuOpen = 1;
 const int _menuCopy = 2;
 const int _menuStatus = 3; // 只读行，禁用
 const int _menuExit = 4;
+const int _menuCheckUpdate = 5;
+const int _menuAutostart = 6;
 
 const int _trayIconId = 1;
 
@@ -45,6 +47,8 @@ SendPort? _actions;
 String _iconKey = 'idle';
 String _tooltip = 'eatgemini · 启动中';
 String _gatewayUrl = '';
+bool _autostartEnabled = false;
+bool _updateAvailable = false;
 bool _quitRequested = false;
 int _bigWindowIcon = 0;
 int _smallWindowIcon = 0;
@@ -221,6 +225,10 @@ void _runPendingActions() {
         if (_gatewayUrl.isNotEmpty) _copyToClipboard(_gatewayUrl);
       case _menuExit:
         _actions?.send({'action': trayActionExit});
+      case _menuCheckUpdate:
+        _actions?.send({'action': trayActionCheckUpdate});
+      case _menuAutostart:
+        _actions?.send({'action': trayActionToggleAutostart});
     }
   }
   if (_menuRequested) {
@@ -246,6 +254,9 @@ void _handleCommand(Object? raw) {
       if (_added) _modifyIcon();
     case trayCmdBalloon:
       if (_added) _showBalloon(raw);
+    case trayCmdMenu:
+      _autostartEnabled = raw['autostart'] == true;
+      _updateAvailable = raw['update'] == true;
     case trayCmdQuit:
       _quitRequested = true;
       DestroyWindow(_hwnd); // WM_DESTROY → 移除图标 + PostQuitMessage
@@ -343,6 +354,13 @@ void _showMenu() {
       menu, _menuStatus, '状态：${_stateLabelOf(_tooltip)}（只读）',
       grayed: true);
   AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
+  _append(
+    menu,
+    _menuCheckUpdate,
+    _updateAvailable ? '检查更新 · 有新版本' : '检查更新',
+  );
+  _append(menu, _menuAutostart, '开机自启', checked: _autostartEnabled);
+  AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
   _append(menu, _menuExit, '退出 eatgemini');
 
   final arena = Arena();
@@ -360,10 +378,17 @@ void _showMenu() {
   DestroyMenu(menu);
 }
 
-void _append(int menu, int id, String label, {bool grayed = false}) {
+void _append(int menu, int id, String label,
+    {bool grayed = false, bool checked = false}) {
+  const int mfChecked = 0x00000008; // MF_CHECKED
   final text = label.toNativeUtf16();
   try {
-    AppendMenu(menu, MF_STRING | (grayed ? MF_GRAYED : 0), id, text);
+    AppendMenu(
+      menu,
+      MF_STRING | (grayed ? MF_GRAYED : 0) | (checked ? mfChecked : 0),
+      id,
+      text,
+    );
   } finally {
     malloc.free(text);
   }
