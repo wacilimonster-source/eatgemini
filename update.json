@@ -1,9 +1,9 @@
 {
-  "version": "0.2.9",
-  "publishedAt": "2026-11-10T15:01:00.493856Z",
-  "notes": "修复托盘点击无反应（改用 ShellExecute 开窗）；详见 Release 说明",
-  "releaseUrl": "https://github.com/wacilimonster-source/eatgemini/releases/tag/v0.2.9",
-  "installerUrl": "https://github.com/wacilimonster-source/eatgemini/releases/download/v0.2.9/eatgemini-setup-v0.2.9.exe",
-  "portableUrl": "https://github.com/wacilimonster-source/eatgemini/releases/download/v0.2.9/eatgemini-v0.2.9.exe",
+  "version": "0.2.10",
+  "publishedAt": "2026-11-10T15:34:57.266841Z",
+  "notes": "宽屏界面适配：内容列居中收窄、大窗排版放大；详见 Release 说明",
+  "releaseUrl": "https://github.com/wacilimonster-source/eatgemini/releases/tag/v0.2.10",
+  "installerUrl": "https://github.com/wacilimonster-source/eatgemini/releases/download/v0.2.10/eatgemini-setup-v0.2.10.exe",
+  "portableUrl": "https://github.com/wacilimonster-source/eatgemini/releases/download/v0.2.10/eatgemini-v0.2.10.exe",
   "installerSize": 15428120
 }

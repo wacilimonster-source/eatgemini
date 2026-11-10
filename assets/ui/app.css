@@ -42,6 +42,9 @@
   --ease-drawer: cubic-bezier(0.22, 0.9, 0.28, 1);
   --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
   --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace;
+  /* 内容列最大宽度：监控页在浏览器标签里打开时窗口往往远宽于原客户端窗口，
+     不加限制会让卡片/表格铺满 1920px，行宽过长、栅格被拉散（见 §宽屏适配）。 */
+  --content-max: 1320px;
   color-scheme: dark;
 }
 /* 浅色：跟随系统（无手动选择时）或手动切换（html.light） */
@@ -212,7 +215,16 @@ body {
 .nav-item.exit:hover { background: var(--err-subtle); color: var(--err); }
 .side-foot { padding: 10px 12px 2px; font-size: 11px; color: var(--text-3); line-height: 1.7; }
 
-.main { flex: 1; min-width: 0; overflow: auto; padding: 20px 24px 28px; }
+.main {
+  flex: 1; min-width: 0; overflow: auto; padding: 20px 24px 28px;
+  scrollbar-gutter: stable;
+}
+/* 内容列居中；页面根节点若自带 maxWidth（设置/密钥/诊断等），一并居中，
+   避免宽屏下所有内容贴着左侧、右侧留一大片空白。 */
+.main > * { width: 100%; max-width: var(--content-max); margin-inline: auto; }
+.main > .fade-in > * { margin-inline: auto; }
+/* 表单型页面（设置/密钥/诊断）：窄栏居中，宽屏下不把输入框拉成整行 */
+.narrow { width: 100%; max-width: 880px; margin-inline: auto; }
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .page-head h2 { font-size: 18px; font-weight: 650; letter-spacing: -0.01em; margin: 0; }
 .page-head .desc { font-size: 12.5px; color: var(--text-2); margin-top: 3px; }
@@ -227,11 +239,12 @@ main h3 { font-size: 13.5px; font-weight: 600; margin: 18px 0 8px; }
 .card-head .sub { font-size: 12px; color: var(--text-3); margin-top: 2px; }
 .card-body { padding: 14px 18px 16px; }
 .grid { display: grid; gap: 12px; }
-.grid.c2 { grid-template-columns: repeat(2, 1fr); }
-.grid.c3 { grid-template-columns: repeat(3, 1fr); }
-.grid.c4 { grid-template-columns: repeat(4, 1fr); }
-.grid.c6 { grid-template-columns: repeat(6, 1fr); }
-.grid.split { grid-template-columns: 1fr 340px; align-items: start; }
+.grid.c2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid.c3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid.c4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.grid.c6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+/* 右侧栏随宽度微调（340–400px），主栏始终优先占据剩余空间 */
+.grid.split { grid-template-columns: minmax(0, 1fr) clamp(330px, 27%, 400px); align-items: start; }
 .sep { height: 1px; background: var(--line-1); border: 0; margin: 14px 0; }
 .row { display: flex; align-items: center; gap: 8px; }
 .row.between { justify-content: space-between; }
@@ -553,6 +566,35 @@ pre.log {
 
 /* ---- 图标尺寸微调 ---- */
 .ic-12 { width: 12px; height: 12px; }
+
+/* ---- 宽屏适配（浏览器标签 / 大显示器） ----
+   原客户端窗口约 720–900px 宽，13px 的紧凑排版在 1440px 以上会显得
+   又小又散；这里放大留白与关键数字，保持内容列居中不铺满全屏。 */
+@media (min-width: 1440px) {
+  .topbar { padding: 0 20px; gap: 16px; }
+  .side { width: 216px; }
+  .main {
+    padding: 24px 32px 40px;
+    background-image: radial-gradient(1200px 400px at 50% -80px, rgba(108, 140, 255, 0.10), transparent 72%);
+  }
+  .grid { gap: 14px; }
+  .card { padding: 18px 20px; }
+  .card-head { padding: 16px 20px 0; }
+  .card-body { padding: 16px 20px 18px; }
+  .stat { padding: 16px 18px; }
+  .stat .v { font-size: 28px; }
+  .chart-hour { height: 140px; }
+  .page-head { margin-bottom: 20px; }
+  .page-head h2 { font-size: 19px; }
+}
+
+@media (min-width: 1780px) {
+  :root { --content-max: 1440px; }
+}
+
+@media (min-width: 2200px) {
+  :root { --content-max: 1600px; }
+}
 
 @media (max-width: 900px) {
   .grid.c6, .grid.c4 { grid-template-columns: repeat(2, 1fr); }

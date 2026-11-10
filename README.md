@@ -61,8 +61,8 @@ pockettavern ─┘        │  配额引擎     2. gemini-2.5-flash-lite   ← 
 ## 三步上手
 
 1. **下载**（二选一，都在 [最新 Release](https://github.com/wacilimonster-source/eatgemini/releases/latest)）
-   - **安装版** `eatgemini-setup-v0.2.9.exe`：双击安装，自动创建开始菜单快捷方式与「应用和功能」卸载项，可用开机自启和检查更新。
-   - **便携版** `eatgemini-v0.2.9.exe`：单个 exe，双击即用，放到哪都能跑（可重命名为 `eatgemini.exe`）。
+   - **安装版** `eatgemini-setup-v0.2.10.exe`：双击安装，自动创建开始菜单快捷方式与「应用和功能」卸载项，可用开机自启和检查更新。
+   - **便携版** `eatgemini-v0.2.10.exe`：单个 exe，双击即用，放到哪都能跑（可重命名为 `eatgemini.exe`）。
 2. **按引导粘贴 AI Studio Key**（先验证有效再保存，DPAPI 本机加密）
 3. **客户端接入**——接入页给出 SillyTavern 的准确填法，手机 pockettavern 用一行连接码
 
@@ -104,10 +104,10 @@ pockettavern ─┘        │  配额引擎     2. gemini-2.5-flash-lite   ← 
 
 ```powershell
 # 需要 Dart SDK 3.x
-powershell -ExecutionPolicy Bypass -File tool/build.ps1 -Version 0.2.9
+powershell -ExecutionPolicy Bypass -File tool/build.ps1 -Version 0.2.10
 # → build/eatgemini.exe                 便携版（GUI 子系统）
-#   build/eatgemini-v0.2.9.exe          发布用便携版副本
-#   build/eatgemini-setup-v0.2.9.exe    安装版（内嵌便携版 exe，单文件）
+#   build/eatgemini-v0.2.10.exe          发布用便携版副本
+#   build/eatgemini-setup-v0.2.10.exe    安装版（内嵌便携版 exe，单文件）
 #   build/update.json                   更新检查回退源（发布时提交到仓库根目录）
 # 只要便携版：加 -SkipInstaller
 ```

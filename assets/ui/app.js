@@ -1463,7 +1463,7 @@ function renderSecrets() {
     ? pill(s.source === 'env' ? '来自环境变量' : '健康 · 本机加密', s.source === 'env' ? 'info' : 'ok')
     : pill('未配置', 'warn');
 
-  return h('div', { css: { maxWidth: '760px' } },
+  return h('div', { class: 'narrow' },
     pageHead('密钥', 'Key 使用 Windows DPAPI 加密存储，仅本机可解密'),
     h('div', { class: 'card' },
       h('div', { class: 'row between' },
@@ -1881,7 +1881,7 @@ function renderSettings() {
     } catch (err) { toast(err.message, 'err'); } finally { done(); }
   };
 
-  return h('div', { css: { maxWidth: '800px' } },
+  return h('div', { class: 'narrow' },
     pageHead('设置', '保存后立即生效（引擎热加载），无需重启',
       unsaved,
       h('button', { class: 'btn btn-primary btn-sm', type: 'button', onclick: save }, h('span', { text: '保存' }))),
@@ -1979,7 +1979,7 @@ function renderDiag() {
       : [h('div', { class: 'dim small', text: '暂无日志' })]));
   };
   renderLogs();
-  return h('div', { css: { maxWidth: '820px' } },
+  return h('div', { class: 'narrow' },
     pageHead('诊断', '导出包不含对话内容与密钥（全链路脱敏）',
       h('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: '刷新', onclick: (e) => { const done = busy(e.currentTarget, '刷新中'); loadDiag().finally(done); } }),
       h('button', {
