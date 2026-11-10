@@ -106,13 +106,23 @@ class TrayCoordinator {
 
   Completer<void>? _readyCompleter;
 
+  final TrayStateCache _stateCache = TrayStateCache();
+
   /// 推送状态与悬停提示（§14：主 → 托盘 {state, tooltip}）。
+  /// 状态没变就跳过，避免每 2 秒一次无意义的托盘 IPC 与图标重绘。
   void update({
     required String state,
     required int todayRequests,
     required String gatewayUrl,
   }) {
     if (!running) return;
+    if (!_stateCache.shouldSend(
+      state: state,
+      todayRequests: todayRequests,
+      gatewayUrl: gatewayUrl,
+    )) {
+      return;
+    }
     _send(trayStateMessage(
       state: state,
       todayRequests: todayRequests,
@@ -144,6 +154,7 @@ class TrayCoordinator {
     _fromTray?.close();
     _fromTray = null;
     _hwnd = 0;
+    _stateCache.reset(); // 重新 start 后必须重发首帧状态
   }
 
   // ---- 关窗检测 ----

@@ -57,32 +57,28 @@ const String _monitorWindowTitle = 'eatgemini 监控';
 
 /// 找到所有监控窗口（按标题匹配 Edge 应用模式窗口）并覆盖其大/小图标。
 /// HICON 由本 isolate 持有，窗口存活期间必须保持有效，故不 DestroyIcon。
+///
+/// 性能关键（托盘点击卡顿修复）：
+/// - 用 `FindWindowEx` 按标题精确查找：窗口管理器在内核侧比较窗口名，
+///   不像 `EnumWindows + GetWindowText` 那样向其他进程发**同步** WM_GETTEXT；
+/// - 用 `PostMessage` 异步下发 WM_SETICON，不再 `SendMessage` 等待 Edge
+///   窗口响应。任一窗口繁忙时都不会阻塞本 isolate 的 GetMessage 循环，
+///   托盘点击才能被立即处理。
 void _applyWindowIcons() {
   if (_bigWindowIcon == 0 || _smallWindowIcon == 0) return;
-  _matchedWindows.clear();
-  EnumWindows(Pointer.fromFunction<WNDENUMPROC>(_monitorWindowEnumProc, 0), 0);
-  for (final hwnd in _matchedWindows) {
-    SendMessage(hwnd, WM_SETICON, ICON_BIG, _bigWindowIcon);
-    SendMessage(hwnd, WM_SETICON, ICON_SMALL, _smallWindowIcon);
-  }
-}
-
-final List<int> _matchedWindows = [];
-
-/// EnumWindows 回调：标题精确等于监控窗口标题的可见顶层窗口。
-int _monitorWindowEnumProc(int hwnd, int lParam) {
-  if (IsWindowVisible(hwnd) == 0) return 1;
-  final len = GetWindowTextLength(hwnd);
-  if (len != _monitorWindowTitle.length) return 1;
-  final buf = calloc<Uint16>(len + 1);
+  final title = _monitorWindowTitle.toNativeUtf16();
   try {
-    GetWindowText(hwnd, buf.cast<Utf16>(), len + 1);
-    final title = buf.cast<Utf16>().toDartString();
-    if (title == _monitorWindowTitle) _matchedWindows.add(hwnd);
+    var hwnd = 0;
+    while (true) {
+      hwnd = FindWindowEx(0, hwnd, nullptr, title);
+      if (hwnd == 0) break;
+      if (IsWindowVisible(hwnd) == 0) continue;
+      PostMessage(hwnd, WM_SETICON, ICON_BIG, _bigWindowIcon);
+      PostMessage(hwnd, WM_SETICON, ICON_SMALL, _smallWindowIcon);
+    }
   } finally {
-    calloc.free(buf);
+    malloc.free(title);
   }
-  return 1;
 }
 
 /// isolate 入口：`Isolate.spawn(trayIsolateMain, {'reply': SendPort})`。

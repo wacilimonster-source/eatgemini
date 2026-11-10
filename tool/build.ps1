@@ -37,8 +37,12 @@ Run-Step "2/8 内嵌界面资源" { & $Dart run tool/embed_assets.dart }
 Run-Step "3/8 测试" { & $Dart test }
 
 if (Test-Path "build/eatgemini.exe") {
-  # 上一个版本还在运行时 Windows 不允许覆盖；先提示而不是产出半成品。
-  $running = Get-Process eatgemini -ErrorAction SilentlyContinue
+  # 只有「正在运行的进程就是本次要覆盖的 build/eatgemini.exe」才拒绝；
+  # 已安装版（%LOCALAPPDATA%\Programs\eatgemini\eatgemini.exe）在运行时不应误报。
+  $targetExe = (Resolve-Path "build/eatgemini.exe").Path
+  $running = Get-Process eatgemini -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.Path -eq $targetExe } catch { $false }
+  }
   if ($running) {
     throw "build/eatgemini.exe 正在运行（PID $($running.Id)），请先从监控窗口退出再构建"
   }

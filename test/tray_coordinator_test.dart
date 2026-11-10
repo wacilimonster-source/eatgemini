@@ -1,4 +1,5 @@
 import 'package:eatgemini/src/desktop/tray_coordinator.dart';
+import 'package:eatgemini/src/desktop/tray_protocol.dart';
 import 'package:test/test.dart';
 
 DateTime _at(int seconds) => DateTime(2026, 1, 1, 12, 0, seconds);
@@ -31,6 +32,43 @@ void main() {
       expect(w.shouldHint(now: _at(14), sseConnections: 0), isFalse);
       expect(w.shouldHint(now: _at(18), sseConnections: 0), isFalse); // 仅 4s
       expect(w.shouldHint(now: _at(19), sseConnections: 0), isTrue); // 5s 满
+    });
+  });
+
+  group('TrayStateCache（状态推送去重）', () {
+    TrayStateCache send(String state, int requests, String gw, TrayStateCache c) {
+      c.shouldSend(state: state, todayRequests: requests, gatewayUrl: gw);
+      return c;
+    }
+
+    test('相同状态不重复推送，任一字段变化才推送', () {
+      final c = TrayStateCache();
+      expect(c.shouldSend(state: 'ready', todayRequests: 3, gatewayUrl: 'gw'),
+          isTrue);
+      expect(c.shouldSend(state: 'ready', todayRequests: 3, gatewayUrl: 'gw'),
+          isFalse);
+      expect(c.shouldSend(state: 'ready', todayRequests: 4, gatewayUrl: 'gw'),
+          isTrue, reason: '今日请求数变化应刷新 tooltip');
+      expect(
+          c.shouldSend(state: 'degraded', todayRequests: 4, gatewayUrl: 'gw'),
+          isTrue);
+      expect(
+          c.shouldSend(
+              state: 'degraded', todayRequests: 4, gatewayUrl: 'gw-2'),
+          isTrue);
+      expect(
+          c.shouldSend(
+              state: 'degraded', todayRequests: 4, gatewayUrl: 'gw-2'),
+          isFalse);
+    });
+
+    test('reset 后重新 start 会重发首帧', () {
+      final c = send('ready', 3, 'gw', TrayStateCache());
+      expect(c.shouldSend(state: 'ready', todayRequests: 3, gatewayUrl: 'gw'),
+          isFalse);
+      c.reset();
+      expect(c.shouldSend(state: 'ready', todayRequests: 3, gatewayUrl: 'gw'),
+          isTrue);
     });
   });
 }

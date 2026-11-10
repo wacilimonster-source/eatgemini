@@ -56,6 +56,36 @@ Map<String, Object?> trayMenuMessage({
       'update': updateAvailable,
     };
 
+/// 状态推送去重：主 isolate 每 2 秒 tick，值没变就不必打扰托盘 isolate
+/// （省掉每 2 秒一次的 SendPort + Shell_NotifyIcon(NIM_MODIFY)）。
+class TrayStateCache {
+  String? _state;
+  int? _requests;
+  String? _gateway;
+
+  bool shouldSend({
+    required String state,
+    required int todayRequests,
+    required String gatewayUrl,
+  }) {
+    if (_state == state &&
+        _requests == todayRequests &&
+        _gateway == gatewayUrl) {
+      return false;
+    }
+    _state = state;
+    _requests = todayRequests;
+    _gateway = gatewayUrl;
+    return true;
+  }
+
+  void reset() {
+    _state = null;
+    _requests = null;
+    _gateway = null;
+  }
+}
+
 /// 悬停提示：`eatgemini · 运行中 · 今日 42 次`（≤127 字符，§14）。
 String buildTrayTooltip({required String state, required int todayRequests}) {
   var text = 'eatgemini · ${trayStateLabel(state)} · 今日 $todayRequests 次';

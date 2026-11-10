@@ -21,6 +21,7 @@ import '../desktop/install_layout.dart';
 import '../desktop/tray_coordinator.dart';
 import '../desktop/update.dart';
 import '../desktop/win_registry.dart';
+import '../desktop/window_activator.dart';
 import '../observe/observability.dart';
 import '../quota/quota.dart';
 import '../secrets/dpapi.dart';
@@ -1152,6 +1153,13 @@ class AppController implements ConsoleHost {
 
   @override
   Future<void> openWindow() async {
+    // 窗口还活着（SSE 连接保持，例如被最小化或被别的窗口遮挡）时直接前置，
+    // 不再无条件冷启动 Edge —— 托盘点击「迟迟不出窗口」的另一主因。
+    // SSE 为 0 说明页面已关闭/会话已断，仍需用新票据启动浏览器。
+    if (console.sseConnections > 0 && activateMonitorWindow()) {
+      logger.info('已前置现有监控窗口（无需重新启动浏览器）', tag: 'window');
+      return;
+    }
     final result = await browser.open(console.launchUri());
     if (result.message != null) {
       logger.warn(result.message!, tag: 'window');
