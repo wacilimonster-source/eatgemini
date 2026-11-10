@@ -1085,6 +1085,7 @@ class AppController implements ConsoleHost {
       if (_stopping) return;
       _pushTrayState();
       tray.tick(now: DateTime.now(), sseConnections: console.sseConnections);
+      tray.pulse(); // 状态去重后仍要唤醒托盘事件循环投递 SendPort 命令
     });
   }
 

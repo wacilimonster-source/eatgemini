@@ -197,6 +197,13 @@ class TrayCoordinator {
     ));
   }
 
+  /// 轻量心跳：只唤醒托盘的 GetMessage 循环，让 SendPort 命令有机会投递，
+  /// 不触发状态推送/图标重绘。状态推送去重后必须保留这个心跳，否则托盘
+  /// isolate 会长期停在阻塞的 GetMessage 上，菜单状态/气泡/退出命令延迟。
+  void pulse() {
+    if (_hwnd != 0) impl.postTrayWake(_hwnd);
+  }
+
   // ---- 内部 ----
 
   void _send(Map<String, Object?> msg) {
@@ -224,12 +231,16 @@ class TrayCoordinator {
     }
     switch (raw['action']) {
       case trayActionOpen:
+        log?.call('托盘请求打开监控窗口');
         onOpenWindow();
       case trayActionExit:
+        log?.call('托盘请求退出');
         unawaited(onExit());
       case trayActionCheckUpdate:
+        log?.call('托盘请求检查更新');
         onCheckUpdate?.call();
       case trayActionToggleAutostart:
+        log?.call('托盘切换开机自启');
         onToggleAutostart?.call();
       case 'bye':
         _bye?.complete();

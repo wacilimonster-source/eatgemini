@@ -1,9 +1,9 @@
 {
-  "version": "0.2.7",
-  "publishedAt": "2026-11-10T14:32:21.010344Z",
-  "notes": "修复托盘点击开窗卡顿；详见 Release 说明",
-  "releaseUrl": "https://github.com/wacilimonster-source/eatgemini/releases/tag/v0.2.7",
-  "installerUrl": "https://github.com/wacilimonster-source/eatgemini/releases/download/v0.2.7/eatgemini-setup-v0.2.7.exe",
-  "portableUrl": "https://github.com/wacilimonster-source/eatgemini/releases/download/v0.2.7/eatgemini-v0.2.7.exe",
-  "installerSize": 15427608
+  "version": "0.2.8",
+  "publishedAt": "2026-11-10T14:51:35.304403Z",
+  "notes": "修复托盘点击无反应；详见 Release 说明",
+  "releaseUrl": "https://github.com/wacilimonster-source/eatgemini/releases/tag/v0.2.8",
+  "installerUrl": "https://github.com/wacilimonster-source/eatgemini/releases/download/v0.2.8/eatgemini-setup-v0.2.8.exe",
+  "portableUrl": "https://github.com/wacilimonster-source/eatgemini/releases/download/v0.2.8/eatgemini-v0.2.8.exe",
+  "installerSize": 15445528
 }

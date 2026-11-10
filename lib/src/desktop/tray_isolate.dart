@@ -68,10 +68,13 @@ void _applyWindowIcons() {
   if (_bigWindowIcon == 0 || _smallWindowIcon == 0) return;
   final title = _monitorWindowTitle.toNativeUtf16();
   try {
+    // 硬性上限 + 句柄去重：窗口 Z 序在 PostMessage 后可能变化，
+    // 绝不能让这个每 2 秒的任务有机会卡住托盘的 GetMessage 循环。
+    final seen = <int>{};
     var hwnd = 0;
-    while (true) {
+    for (var i = 0; i < 32; i++) {
       hwnd = FindWindowEx(0, hwnd, nullptr, title);
-      if (hwnd == 0) break;
+      if (hwnd == 0 || !seen.add(hwnd)) break;
       if (IsWindowVisible(hwnd) == 0) continue;
       PostMessage(hwnd, WM_SETICON, ICON_BIG, _bigWindowIcon);
       PostMessage(hwnd, WM_SETICON, ICON_SMALL, _smallWindowIcon);

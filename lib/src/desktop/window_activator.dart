@@ -15,25 +15,44 @@ const String kMonitorWindowTitle = 'eatgemini 监控';
 
 /// 找到所有可见的监控窗口并前置；返回是否至少激活了一个。
 ///
-/// 非 Windows 或没有窗口时返回 false，调用方照常走浏览器启动路径。
+/// 后台进程直接调用 SetForegroundWindow 会被 Windows 前台锁定静默拒绝，
+/// 窗口其实没被提到前面。所以先用 HWND_TOPMOST → HWND_NOTOPMOST 把窗口
+/// 真正带到可见最前（不需要前台权限），再用 AttachThreadInput 临时共享
+/// 前台线程输入队列来提高抢前台的成功率。
+/// 循环有硬性上限并按 hwnd 去重，绝不会卡死调用线程。
 bool activateMonitorWindow({String title = kMonitorWindowTitle}) {
   if (!Platform.isWindows) return false;
   final nativeTitle = title.toNativeUtf16();
   try {
+    const int maxWindows = 32;
+    const int flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+    final seen = <int>{};
     var hwnd = 0;
-    var found = false;
-    while (true) {
+    var activated = false;
+    for (var i = 0; i < maxWindows; i++) {
       hwnd = FindWindowEx(0, hwnd, nullptr, nativeTitle);
-      if (hwnd == 0) break;
+      if (hwnd == 0 || !seen.add(hwnd)) break;
       if (IsWindowVisible(hwnd) == 0) continue;
-      // 最小化 → 还原；随后提到顶层并请求前台（前台锁定失败也无妨，
-      // ShowWindow 已让窗口可见，不阻塞等待任何跨进程响应）。
+
       ShowWindow(hwnd, SW_RESTORE);
+      SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+      SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
       BringWindowToTop(hwnd);
+
+      final foreground = GetForegroundWindow();
+      final fgThread = GetWindowThreadProcessId(foreground, nullptr);
+      final myThread = GetCurrentThreadId();
+      var attached = false;
+      if (fgThread != 0 && fgThread != myThread) {
+        attached = AttachThreadInput(myThread, fgThread, TRUE) != 0;
+      }
       SetForegroundWindow(hwnd);
-      found = true;
+      if (attached) AttachThreadInput(myThread, fgThread, FALSE);
+      // 只有真正抢到前台才算快速路径成功；否则 openWindow() 会回退启动
+      // 浏览器，保证托盘点击一定有反馈，绝不会出现「点了没反应」。
+      if (GetForegroundWindow() == hwnd) activated = true;
     }
-    return found;
+    return activated;
   } finally {
     malloc.free(nativeTitle);
   }
